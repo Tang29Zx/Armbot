@@ -1,5 +1,6 @@
 slam_toolbox:
   ros__parameters:
+    transform_tolerance: 1.0    # 8-22: 容忍 tf 延迟，防 MessageFilter 队列满丢帧
     # --- Mode ---
     mode: localization
 
@@ -7,7 +8,7 @@ slam_toolbox:
     odom_frame: odom
     map_frame: map
     base_frame: base_link
-    scan_topic: /scan
+    scan_topic: /scan_slam
 
     # --- Map (loaded from file at launch) ---
     map_file_name: ""
@@ -22,15 +23,15 @@ slam_toolbox:
     # --- Scan matching (localization-tuned) ---
     minimum_travel_distance: 0.1
     minimum_travel_heading: 0.3
-    scan_buffer_size: 10
+    scan_buffer_size: 20
     scan_buffer_max_scan_distance: 10.0
-    link_match_minimum_response_fine: 0.15
+    link_match_minimum_response_fine: 0.2
     link_scan_maximum_distance: 1.5
 
     # --- Correlation ---
     correlation_search_space_dimension: 0.5
-    correlation_search_space_resolution: 0.01
-    correlation_search_space_smear_deviation: 0.1
+    correlation_search_space_resolution: 0.005
+    correlation_search_space_smear_deviation: 0.05
 
     # --- Localization-specific ---
     enable_update_loop_closure: false

@@ -1,33 +1,38 @@
 """
-Navigation mode — load a saved map and navigate autonomously.
+Navigation mode — load a saved map and navigate autonomously.  (2026-08-22 重写)
 
 Launches:
-  - robot.launch.py        (chassis + LiDAR + tf)
-  - map_server             (serve the saved .pgm/.yaml map)
-  - slam_toolbox           (localization mode: scan-to-map matching)
-  - Nav2 nodes:
-      controller_server, planner_server, behavior_server,
-      bt_navigator, waypoint_follower, velocity_smoother
-  - lifecycle_manager      (auto-activates Nav2 nodes)
-  - rviz2
+  - ydlidar_node          (official LiDAR driver, X2 single channel)
+  - scan_filter           (filter body/mount points < 0.8m -> /scan_filtered)
+  - map_server            (serve the saved .pgm/.yaml map)
+  - map_relay             (relay full map to /map_static for costmap static layer)
+  - slam_toolbox          (localization mode: scan-to-map matching)
+  - Nav2 nodes: controller_server, planner_server, behavior_server,
+    bt_navigator, waypoint_follower, velocity_smoother
+  - lifecycle_manager     (auto-activates Nav2 nodes)
+  - static tf base_link -> laser  (chassis runs separately, no robot_state_pub)
+
+IMPORTANT (8-22 lessons baked in):
+  * 底盘(chassis_control) 不在此 launch 内！nav.launch 内嵌底盘经常 I2C Errno 121
+    不发 tf，必须单独启动：ros2 launch chassis_control chassis_control.launch.py
+    推荐用 ~/start_nav.sh 一键启动（含底盘独立拉起 + tf 验证）。
+  * slam 不传 map_file_name（.yaml 会导致 DeserializePoseGraph 崩溃），
+    初始地图从 map_server 的 /map 订阅；用 TimerAction 延迟 6s 等 map_server 激活。
+  * costmap 静态层订阅 /map_static（map_relay 转发），避免 slam 局部小图覆盖完整图。
 
 Usage:
-  ros2 launch armbot_bringup nav.launch.py map:=/path/to/map.yaml
-  ros2 launch armbot_bringup nav.launch.py map:=maps/office.yaml
-
-After launch, use RViz "2D Nav Goal" to set a navigation target.
+  ros2 launch armbot_bringup nav.launch.py map:=/home/sunrise/map_verify.yaml use_rviz:=false lidar_port:=/dev/ttyUSB0
+  use_lidar:=false  = 无雷达纯里程计导航（静态 map->odom + base_link->laser 不需要）
 """
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
-    IncludeLaunchDescription,
     TimerAction,
+    ExecuteProcess,
 )
-from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
-from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
+from launch.conditions import IfCondition, UnlessCondition
 from launch_ros.actions import Node
-from launch_ros.substitutions import FindPackageShare
 from ament_index_python.packages import get_package_share_directory
 import os
 
@@ -39,8 +44,8 @@ def generate_launch_description():
 
     # ── Arguments ──
     map_arg = DeclareLaunchArgument(
-        'map', default_value='',
-        description='Full path to map.yaml (e.g. /home/sunrise/maps/office.yaml)')
+        'map', default_value='/home/sunrise/map_verify.yaml',
+        description='Full path to map.yaml (e.g. /home/sunrise/map_verify.yaml)')
     lidar_port_arg = DeclareLaunchArgument(
         'lidar_port', default_value='/dev/ttyUSB0')
     lidar_baud_arg = DeclareLaunchArgument(
@@ -48,20 +53,42 @@ def generate_launch_description():
     use_rviz_arg = DeclareLaunchArgument(
         'use_rviz', default_value='true',
         description='Launch RViz2 for visualization')
+    use_lidar_arg = DeclareLaunchArgument(
+        'use_lidar', default_value='true',
+        description='true=雷达定位导航; false=静态 map->odom 纯里程计导航')
 
-    # ── Robot base ──
-    robot_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            PathJoinSubstitution([
-                FindPackageShare('armbot_bringup'),
-                'launch',
-                'robot.launch.py',
-            ])
-        ]),
-        launch_arguments={
-            'lidar_port': LaunchConfiguration('lidar_port'),
-            'lidar_baudrate': LaunchConfiguration('lidar_baudrate'),
-        }.items(),
+    # ── Official YDLidar driver（X2 单通道，唯一可用稳定驱动）──
+    ydlidar_node = Node(
+        package='ydlidar',
+        executable='ydlidar_node',
+        name='ydlidar_node',
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_lidar')),
+        parameters=[{
+            'port': LaunchConfiguration('lidar_port'),
+            'frame_id': 'laser',
+            'baudrate': 115200,
+            'singleChannel': True,
+            'angle_min': -180.0,
+            'angle_max': 180.0,
+            'frequency': 5.0,    # 8-22 15:33: 8Hz 数据量超 slam 处理→MessageFilter 队列满丢帧→slam 假死
+        }],
+    )
+
+    # ── Scan filter：滤 <0.8m 车体/支架/无效点（防 costmap 障碍环 + 保留 0.8-1m 定位特征）──
+    scan_filter_node = ExecuteProcess(
+        cmd=['python3', '/tmp/scan_filter.py'],
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_lidar')),
+    )
+
+    # ── static tf base_link -> laser（底盘单独启动后没有 robot_state_pub，需手动发布）──
+    # 数值来自 URDF: base_lidar_joint(0.175,0,0.15) + laser_joint(0,0,0.03) = (0.175,0,0.18)
+    static_laser_tf = ExecuteProcess(
+        cmd=['ros2', 'run', 'tf2_ros', 'static_transform_publisher',
+             '0.175', '0', '0.18', '0', '0', '0', 'base_link', 'laser'],
+        output='screen',
+        condition=IfCondition(LaunchConfiguration('use_lidar')),
     )
 
     # ── Map Server ──
@@ -75,23 +102,38 @@ def generate_launch_description():
         }],
     )
 
+    # ── Map Relay：只把 map_server 完整图转发到 /map_static（costmap 静态层用）──
+    map_relay_node = ExecuteProcess(
+        cmd=['python3', '/tmp/map_relay.py'],
+        output='screen',
+    )
+
     # ── SLAM Toolbox (localization mode) ──
+    # 不传 map_file_name（.yaml 会崩）；从 map_server 的 /map 订阅初始地图
     localize_node = Node(
         package='slam_toolbox',
         executable='localization_slam_toolbox_node',
         name='slam_toolbox',
         output='screen',
-        parameters=[local_params, {
-            'map_file_name': LaunchConfiguration('map'),
-        }],
+        condition=IfCondition(LaunchConfiguration('use_lidar')),
+        parameters=[local_params],
     )
 
-    # ── Nav2: Controller Server ──
+    # ── 静态 map->odom（use_lidar=false 时替代 slam 定位，纯里程计导航）──
+    static_map_odom = ExecuteProcess(
+        cmd=['ros2', 'run', 'tf2_ros', 'static_transform_publisher',
+             '0', '0', '0', '0', '0', '0', 'map', 'odom'],
+        output='screen',
+        condition=UnlessCondition(LaunchConfiguration('use_lidar')),
+    )
+
+    # ── Nav2: Controller Server（输出 /cmd_vel_raw，经 smoother 平滑后给底盘）──
     controller_node = Node(
         package='nav2_controller',
         executable='controller_server',
         name='controller_server',
         output='screen',
+        remappings=[('/cmd_vel', '/cmd_vel_raw')],
         parameters=[nav2_params],
     )
 
@@ -131,12 +173,13 @@ def generate_launch_description():
         parameters=[nav2_params],
     )
 
-    # ── Nav2: Velocity Smoother ──
+    # ── Nav2: Velocity Smoother（订阅 /cmd_vel_raw，平滑后输出 /cmd_vel 给底盘）──
     smoother_node = Node(
         package='nav2_velocity_smoother',
         executable='velocity_smoother',
         name='velocity_smoother',
         output='screen',
+        remappings=[('cmd_vel', 'cmd_vel_raw'), ('cmd_vel_smoothed', 'cmd_vel')],
         parameters=[nav2_params],
     )
 
@@ -150,6 +193,7 @@ def generate_launch_description():
             'use_sim_time': False,
             'autostart': True,
             'node_names': [
+                'map_server',
                 'controller_server',
                 'planner_server',
                 'behavior_server',
@@ -177,10 +221,19 @@ def generate_launch_description():
         lidar_port_arg,
         lidar_baud_arg,
         use_rviz_arg,
-        robot_launch,
+        use_lidar_arg,
+        # 雷达 → 过滤 → 静态tf（use_lidar 链路）
+        ydlidar_node,
+        scan_filter_node,
+        static_laser_tf,
+        # 地图
+        map_relay_node,
         map_server_node,
-        # Small delay so map_server loads the map before localization starts
-        TimerAction(period=0.5, actions=[localize_node]),
+        # slam 等 map_server 激活发布 /map 后再启动（map_server 需 2-3s 激活）
+        TimerAction(period=6.0, actions=[localize_node]),
+        # 静态 map->odom（无雷达模式）
+        static_map_odom,
+        # Nav2 全套
         TimerAction(period=1.0, actions=[
             controller_node,
             planner_node,

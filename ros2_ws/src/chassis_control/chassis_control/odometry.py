@@ -23,7 +23,7 @@ ENCODER_PPR    = 3924         # 标定值 (2026-08-17 实测验证：推车 1.0m
 
 # 运动学常数（预计算）
 _KIN_K = WHEEL_RADIUS / 4.0
-_KIN_W = _KIN_K / (WHEEL_DIST_LR / 2.0 + WHEEL_DIST_FB / 2.0)
+_KIN_W = _KIN_K / (WHEEL_DIST_LR + WHEEL_DIST_FB) * 1.315   # 修复：分母不再额外 /2；8-18 整圈校准（odom 367°=实际 330°）→ ×1.315
 
 # ─── 数据结构 ──────────────────────────────────────────────────
 
@@ -133,14 +133,18 @@ class Odometry:
         dtheta = []
         for i in range(4):
             delta = enc[i] - self._last_enc[i]
-            dtheta.append(delta / ENCODER_PPR * 2.0 * math.pi)
+            # 8-22: 编码器跳变保护——单帧 delta 超 500（正常直行 ~20-30）判定读数错误，该轮忽略
+            if abs(delta) > 500:
+                dtheta.append(0.0)
+            else:
+                dtheta.append(delta / ENCODER_PPR * 2.0 * math.pi)
             self._last_enc[i] = enc[i]
 
         # 3. 麦克纳姆正向运动学 → 底盘速度
         # 轮序: [0]=M1右前  [1]=M2右后  [2]=M3左前  [3]=M4左后
         vx = _KIN_K * (dtheta[0] - dtheta[1] - dtheta[2] + dtheta[3]) / self._dt
         vy = _KIN_K * (dtheta[0] + dtheta[1] + dtheta[2] + dtheta[3]) / self._dt
-        wz = _KIN_W * (-dtheta[0] + dtheta[1] - dtheta[2] + dtheta[3]) / self._dt
+        wz = -_KIN_W * (-dtheta[0] + dtheta[1] - dtheta[2] + dtheta[3]) / self._dt  # 8-18: 翻转符号修旋转方向（cmd +z 应报正）
 
         # 4. 位姿积分（欧拉法）
         self.pose.theta += wz * self._dt

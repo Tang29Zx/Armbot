@@ -141,6 +141,9 @@ class LeArmChassisNode(Node):
     def cmd_vel_callback(self, msg: Twist):
         motor_speeds, angle, speed, rot = twist_to_motor_speeds(
             msg, self.max_linear, self.max_angular)
+        if motor_speeds != self.target_speeds:
+            self.get_logger().info(
+                f"CMD: vx={msg.linear.x:.2f} wz={msg.angular.z:.2f} -> motor={motor_speeds}")
         self.target_speeds = motor_speeds
         self.last_cmd_time = self.get_clock().now()
         self.get_logger().debug(
@@ -153,15 +156,18 @@ class LeArmChassisNode(Node):
     def update(self):
         now = self.get_clock().now()
 
-        # 超时检测：长时间没收到 /cmd_vel 就停车
+        # 超时检测：长时间没收到 /cmd_vel 就强制停车（8-18: 改用 emergency_stop 写 3 遍，确保驱动板真正停车）
         if (now - self.last_cmd_time).nanoseconds / 1e9 > self.cmd_timeout:
-            if self.target_speeds != [0, 0, 0, 0]:
-                self.get_logger().warn("Cmd_vel timeout, stopping motors.")
+            if self.target_speeds != [0, 0, 0, 0] or self.current_speeds != [0, 0, 0, 0]:
+                self.get_logger().warn("Cmd_vel timeout, forcing stop.")
+                self.driver.emergency_stop()
             self.target_speeds = [0, 0, 0, 0]
+            self.current_speeds = [0, 0, 0, 0]
 
         # 电机速度写入（立即写入，不渐变）
         if self.target_speeds != self.current_speeds:
             self.driver.set_speed(self.target_speeds)
+            self.get_logger().info(f"SETSPEED: {self.target_speeds}")
             self.current_speeds = list(self.target_speeds)
 
         # 更新里程计

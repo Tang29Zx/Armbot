@@ -60,7 +60,7 @@
 #     z_max: 0.05
 #     z_rand: 0.5
 #     z_short: 0.05
-#     scan_topic: /scan
+#     scan_topic: /scan_filtered
 
 # =============================================================================
 # Controller Server
@@ -81,13 +81,13 @@ controller_server:
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
       required_movement_radius: 0.2
-      movement_time_allowance: 3.0
+      movement_time_allowance: 12.0
 
     # --- Goal checker ---
     general_goal_checker:
       plugin: "nav2_controller::SimpleGoalChecker"
-      xy_goal_tolerance: 0.15
-      yaw_goal_tolerance: 0.25
+      xy_goal_tolerance: 0.12
+      yaw_goal_tolerance: 0.15
       stateful: true
 
     # --- FollowPath (DWB — Dynamic Window Approach) ---
@@ -103,7 +103,7 @@ controller_server:
       max_vel_y: 0.15
       max_vel_theta: 0.4
       min_speed_xy: 0.0
-      max_speed_xy: 0.15
+      max_speed_xy: 0.25
       min_speed_theta: 0.0
       acc_lim_x: 0.5
       acc_lim_y: 0.3
@@ -111,15 +111,15 @@ controller_server:
       decel_lim_x: -0.5
       decel_lim_y: -0.3
       decel_lim_theta: -1.5
-      vx_samples: 10
-      vy_samples: 5                 # enable mecanum lateral motion
-      vtheta_samples: 20
-      sim_time: 2.5
+      vx_samples: 8
+      vy_samples: 8                 # mecanum 横移采样
+      vtheta_samples: 6    # 8-22 16:17: 降采样防 controller 掉帧
+      sim_time: 1.0    # 8-22 16:17: 轨迹前瞻缩短防掉帧
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 0.2
-      xy_goal_tolerance: 0.15
-      yaw_goal_tolerance: 0.25
+      xy_goal_tolerance: 0.12
+      yaw_goal_tolerance: 0.15
       trans_stopped_velocity: 0.01
       rot_stopped_velocity: 0.01
       short_circuit_trajectory_evaluation: true
@@ -141,7 +141,7 @@ controller_server:
       GoalAlign.scale: 12.0
       GoalAlign.forward_point_distance: 0.325
       GoalDist.scale: 12.0
-      PathAlign.scale: 16.0
+      PathAlign.scale: 30.0     # 增强车头对齐路径：目标在后方时先原地转头再走
       PathDist.scale: 16.0
       PreferForward.scale: 0.1
 
@@ -207,6 +207,7 @@ bt_navigator:
     robot_base_frame: base_link
     odom_topic: /odom
     bt_loop_duration: 10
+    default_bt_xml_filename: navigate_w_replanning_only_if_goal_is_updated.xml
     default_server_timeout: 20
     wait_for_service_timeout: 1000
 
@@ -276,7 +277,7 @@ velocity_smoother:
     odom_topic: /odom
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
-    velocity_timeout: 1.0
+    velocity_timeout: 1.0    # 8-22: 平衡——急停 1s 内停，controller 掉帧不顿挫（0.3 太短车振荡）
 
 # =============================================================================
 # Global Costmap
@@ -294,7 +295,7 @@ global_costmap:
       height: 200
       rolling_window: false
       always_send_full_costmap: false
-      track_unknown_space: true
+      track_unknown_space: false
       transform_tolerance: 0.3
 
       # Robot footprint — rectangular approximation
@@ -307,6 +308,7 @@ global_costmap:
 
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
+        map_topic: /map_static     # 8-22: 只加载 map_relay 转发的完整图（避免 slam 局部图覆盖）
         map_subscribe_transient_local: true
         enabled: true
         subscribe_to_updates: true
@@ -316,7 +318,7 @@ global_costmap:
         enabled: true
         observation_sources: scan
         scan:
-          topic: /scan
+          topic: /scan_filtered
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -324,12 +326,12 @@ global_costmap:
           raytrace_max_range: 5.0
           raytrace_min_range: 0.1
           obstacle_max_range: 4.0
-          obstacle_min_range: 0.1
+          obstacle_min_range: 1.0    # 8-22: 不标记 <1.0m（假障碍环双保险）
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
-        inflation_radius: 0.28
+        inflation_radius: 0.15
         cost_scaling_factor: 5.0
 
 # =============================================================================
@@ -344,8 +346,8 @@ local_costmap:
       update_frequency: 5.0
       publish_frequency: 2.0
       resolution: 0.05
-      width: 60            # 60 * 0.05 = 3m
-      height: 60
+      width: 3            # 60 * 0.05 = 3m
+      height: 3
       rolling_window: true
       always_send_full_costmap: false
       track_unknown_space: false
@@ -361,7 +363,7 @@ local_costmap:
         enabled: true
         observation_sources: scan
         scan:
-          topic: /scan
+          topic: /scan_filtered
           max_obstacle_height: 2.0
           clearing: true
           marking: true
@@ -369,12 +371,12 @@ local_costmap:
           raytrace_max_range: 3.0
           raytrace_min_range: 0.1
           obstacle_max_range: 2.5
-          obstacle_min_range: 0.1
+          obstacle_min_range: 1.0    # 8-22: 不标记 <1.0m（假障碍环双保险）
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
-        inflation_radius: 0.28
+        inflation_radius: 0.15
         cost_scaling_factor: 5.0
 
 
