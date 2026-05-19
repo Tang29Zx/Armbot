@@ -1,6 +1,6 @@
 from setuptools import find_packages, setup
 
-package_name = 'camera'
+package_name = 'auto_reconstruction'
 
 setup(
     name=package_name,
@@ -14,7 +14,7 @@ setup(
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='determinant',
-    maintainer_email='determinant@todo.todo',
+    maintainer_email='13816096470@163.com',
     description='TODO: Package description',
     license='TODO: License declaration',
     extras_require={
@@ -24,7 +24,7 @@ setup(
     },
     entry_points={
         'console_scripts': [
-            'camera_node = camera.camera_node:main'
+            'auto_saver = auto_reconstruction.auto_saver:main',
         ],
     },
 )

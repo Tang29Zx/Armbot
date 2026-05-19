@@ -4,6 +4,7 @@
 build/
 install/
 log/
+colmap_ws
 
 #=========================
 #Python cache
