@@ -1,0 +1,116 @@
+name: 功能任务
+description: 提议一个可验收的新功能、改进或重构任务
+title: "[Feature] "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        一个好的功能 Issue 应当说明目标、边界和验收标准，而不只是写“研究一下”或“优化一下”。
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: 所属模块
+      options:
+        - SLAM / Mapping
+        - Perception
+        - Navigation
+        - Arm Control
+        - VLA
+        - ROS 2 / Communication
+        - Hardware
+        - Web / Visualization
+        - Build / CI
+        - Documentation
+        - 跨模块或暂不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: background
+    attributes:
+      label: 背景与用户价值
+      description: 当前有什么问题？完成后会给用户、开发者或演示带来什么变化？
+      placeholder: 例如：当前地图只能保存在内存中，重启后必须重新建图，影响重复演示效率。
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目标
+      description: 用一句到几句话说明最终要实现的结果。
+      placeholder: 例如：支持通过统一命令保存地图，并在下次启动时从配置路径加载。
+    validations:
+      required: true
+
+  - type: textarea
+    id: scope
+    attributes:
+      label: 范围与非目标
+      description: 明确本任务包含什么、不包含什么，避免需求不断扩大。
+      placeholder: |
+        包含：地图保存、加载、错误提示。
+        不包含：多地图管理、云端同步。
+    validations:
+      required: true
+
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 验收标准
+      description: 使用可勾选、可测试的条件定义“完成”。
+      placeholder: |
+        - [ ] 可以通过命令保存地图
+        - [ ] 重启后可以加载地图
+        - [ ] 路径不存在时给出明确错误
+        - [ ] 在 RDK X5 上完成一次验证
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议实现方案
+      description: 可选。说明接口、数据流、涉及文件或技术方案；不要把未经确认的方案写成硬性要求。
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: 依赖与阻塞项
+      description: 列出前置 Issue、外部硬件、数据、权限或尚未确定的接口。
+      placeholder: 例如：依赖 #12 完成 ROS 2 消息定义。
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: 风险与兼容性
+      description: 说明对现有接口、实时性、硬件安全、资源占用或其他模块的潜在影响。
+
+  - type: dropdown
+    id: validation
+    attributes:
+      label: 预计验证方式
+      options:
+        - 纯软件单元测试 / CI
+        - PC 或仿真环境验证
+        - RDK 实机验证
+        - 机械臂或底盘实机验证
+        - 需要多种验证方式
+        - 暂不确定
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，未发现重复任务。
+          required: true
+        - label: 该任务有明确、可验证的验收标准。
+          required: true
+        - label: 如果任务预计超过 2 天，我已考虑将其拆成父 Issue 和多个子 Issue。
+          required: true
