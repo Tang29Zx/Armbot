@@ -96,3 +96,12 @@ HybrIK/
 #Codex
 #=========================
 .codex
+AGENTS.md
+MEMORY.md
+
+#=========================
+#RDK video runtime artifacts
+#=========================
+/rdk_video_push/logs/
+*.pid
+*.h264
