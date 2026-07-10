@@ -1,0 +1,108 @@
+name: Bug 报告
+description: 报告可复现的故障、异常行为或回归问题
+title: "[Bug] "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢反馈。请尽量提供可复现步骤、环境信息和完整日志；不要在 Issue 中粘贴密码、Token、私钥等敏感信息。
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: 影响模块
+      description: 选择最主要的受影响模块。
+      options:
+        - SLAM / Mapping
+        - Perception
+        - Navigation
+        - Arm Control
+        - VLA
+        - ROS 2 / Communication
+        - Hardware
+        - Web / Visualization
+        - Build / CI
+        - Documentation
+        - 跨模块或暂不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: 问题概述
+      description: 用几句话说明发生了什么，以及它为什么是问题。
+      placeholder: 例如：摄像头断开后节点持续占用 CPU，且无法自动恢复。
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: 复现步骤
+      description: 从干净环境开始，按顺序写出可以稳定复现问题的步骤。
+      placeholder: |
+        1. 启动 ...
+        2. 执行 ...
+        3. 断开 ...
+        4. 观察到 ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+      description: 正常情况下应该发生什么？
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: 实际行为
+      description: 实际发生了什么？请说明是否稳定复现、是否会自行恢复。
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 运行环境
+      description: 填写与问题有关的软硬件版本。
+      placeholder: |
+        - Device: RDK X5 / PC / other
+        - OS:
+        - ROS 2 distro:
+        - Python version:
+        - Branch / commit:
+        - Relevant hardware / firmware:
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: 日志、截图或最小复现
+      description: 粘贴关键日志，或提供截图、录屏、最小复现代码。请使用代码块包裹日志。
+      render: shell
+
+  - type: textarea
+    id: impact
+    attributes:
+      label: 影响与风险
+      description: 说明是否阻塞开发、影响演示、可能损坏硬件，或存在安全风险。
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，未发现重复问题。
+          required: true
+        - label: 我已移除日志中的密码、Token、私钥和其他敏感信息。
+          required: true
+        - label: 如问题可能导致机械臂、底盘或其他硬件危险动作，我已明确标注风险。
+          required: true
