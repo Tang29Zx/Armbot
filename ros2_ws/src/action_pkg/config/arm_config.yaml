@@ -1,0 +1,48 @@
+# arm_config.yaml -- config contract (docs/arm-control-interface.md sec 4)
+# All hardware-specific values must live here, never as code constants.
+# Loaded by launch/arm_control.launch.py and pushed as ROS parameters.
+
+# --- I2C / bus (sec 2.3) ---
+i2c_bus: 5
+i2c_address: 48            # 0x30 (YAML has no 0x literal; use decimal)
+
+# --- timing / safety ---
+command_timeout_sec: 1.0
+min_duration_sec: 0.1      # duration_sec below this is rejected
+max_duration_sec: 30.0     # duration_sec above this is rejected
+
+# --- joint naming (sec 3.4 canonical names) ---
+joint_names:
+  - joint_1_base
+  - joint_2_shoulder
+  - joint_3_elbow
+  - joint_4_wrist_pitch
+  - joint_5_wrist_roll
+
+# --- servo id mapping (UNCONFIRMED: ids 1..6 vs 5 joints + gripper) ---
+# Format: "<joint_name>:<servo_id>"
+servo_id_map:
+  - joint_1_base:1
+  - joint_2_shoulder:2
+  - joint_3_elbow:3
+  - joint_4_wrist_pitch:4
+  - joint_5_wrist_roll:5
+  - gripper:6
+
+# --- joint calibration / soft limits (units: rad) ---
+joint_zero_offsets: [0.0, 0.0, 0.0, 0.0, 0.0]
+joint_directions: [1, 1, 1, 1, 1]
+joint_lower_limits: [-3.14159, -3.14159, -3.14159, -3.14159, -3.14159]
+joint_upper_limits: [ 3.14159,  3.14159,  3.14159,  3.14159,  3.14159]
+
+# --- gripper raw mapping (raw angle units sent to the gripper servo) ---
+gripper_closed_raw: 0.0
+gripper_open_raw: 180.0
+
+# --- end-effector frame / units (UNCONFIRMED with STM32 firmware) ---
+end_effector_frame: base
+end_effector_units: mm
+
+# --- publish /joint_states only after real position feedback is verified ---
+# (contract sec 3.4 / sec 5.7: never forge joint positions)
+joint_feedback_enabled: false
