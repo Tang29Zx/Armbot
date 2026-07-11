@@ -19,15 +19,20 @@ joint_names:
   - joint_4_wrist_pitch
   - joint_5_wrist_roll
 
-# --- servo id mapping (UNCONFIRMED: ids 1..6 vs 5 joints + gripper) ---
+# --- servo id mapping (topology CONFIRMED against robot_arm.c, 2026-07-12) ---
+# 舵机1=夹爪(gripper)  舵机2=腕旋转(wrist_roll)
+# 舵机3=wrist_pitch(kinematics.knot[3])  舵机4=elbow(knot[2])
+# 舵机5=shoulder(knot[1])                舵机6=base(knot[0])
+# (theta2servo: servo = 6 - i, i=0..3 对应 knot[0..3])
 # Format: "<joint_name>:<servo_id>"
+# NOTE: 各关节零位/方向(joint_zero_offsets / joint_directions)仍属 §7 待实机标定项。
 servo_id_map:
-  - joint_1_base:1
-  - joint_2_shoulder:2
-  - joint_3_elbow:3
-  - joint_4_wrist_pitch:4
-  - joint_5_wrist_roll:5
-  - gripper:6
+  - joint_1_base:6
+  - joint_2_shoulder:5
+  - joint_3_elbow:4
+  - joint_4_wrist_pitch:3
+  - joint_5_wrist_roll:2
+  - gripper:1
 
 # --- joint calibration / soft limits (units: rad) ---
 joint_zero_offsets: [0.0, 0.0, 0.0, 0.0, 0.0]
@@ -43,6 +48,6 @@ gripper_open_raw: 180.0
 end_effector_frame: base
 end_effector_units: mm
 
-# --- publish /joint_states only after real position feedback is verified ---
-# (contract sec 3.4 / sec 5.7: never forge joint positions)
-joint_feedback_enabled: false
+# --- publish /joint_states from REAL hardware feedback (servo positions read
+#     back over I2C). Topology verified 2026-07-12; joint sign/zero still §7. ---
+joint_feedback_enabled: true

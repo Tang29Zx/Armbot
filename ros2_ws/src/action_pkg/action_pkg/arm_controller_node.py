@@ -35,7 +35,10 @@ except ImportError:  # pragma: no cover - runtime dep, keep node importable for 
 
 
 CMD_PACKET_SIZE = 32
-STATUS_SIZE = 8
+# Status packet is now 32 bytes: byte0..7 = text status code, byte8..31 =
+# float32[6] real servo raw positions (see STM32 main.c I2C_JOINT_POS_OFFSET).
+STATUS_PACKET_SIZE = 32
+I2C_JOINT_COUNT = 6
 
 # I2C command byte tags (must match STM32 firmware; contract sec 2.3)
 TAG_ARM = ord('A')
@@ -53,6 +56,52 @@ ERR_DURATION_RANGE = 0x0012
 ERR_GRIPPER_NONFINITE = 0x0013
 ERR_GRIPPER_RANGE = 0x0014
 ERR_GRIPPER_UNMAPPED = 0x0015
+
+# Command lifecycle (contract sec 5.3 / command_timeout_sec)
+ERR_CMD_TIMEOUT = 0x0016
+ERR_STALE_CMD = 0x0017
+
+# Firmware status codes returned in the 8-byte I2C status packet (main.c).
+FW_STATUS_STM32_OK = 'STM32_OK'
+FW_STATUS_ARM_OK = 'ARM_OK__'
+FW_STATUS_SVO_OK = 'SVO_OK__'
+FW_STATUS_STOP_OK = 'STOP_OK_'
+FW_STATUS_NO_SOLVE = 'NO_SOLVE'
+FW_STATUS_ARM_ERR = 'ARM_ERR_'
+FW_STATUS_BAD_CMD = 'BAD_CMD_'
+FW_STATUS_ARM_DONE = 'ARM_DONE'
+
+# Firmware-reported error codes (distinct from node-side validation codes).
+ERR_FW_NO_SOLVE = 0x0020
+ERR_FW_NOT_READY = 0x0021
+ERR_FW_BAD_CMD = 0x0022
+
+
+def _decode_firmware_status(code):
+    """Map an 8-char firmware status code to (ArmState, error_code, message).
+
+    Returns (None, 0, '') for unrecognized codes (leave node state as-is).
+    'ARM_OK__'/'SVO_OK__' mean the command was accepted and motion started
+    (NOT that it finished). 'ARM_DONE' means all tracked servos have reached
+    their targets (completion signal; firmware reports it after the motion).
+    """
+    if code in (FW_STATUS_ARM_OK, FW_STATUS_SVO_OK):
+        return (ArmState.STATE_MOVING, 0, '')
+    if code == FW_STATUS_ARM_DONE:
+        return (ArmState.STATE_SUCCEEDED, 0, 'firmware: motion completed')
+    if code in (FW_STATUS_STOP_OK, FW_STATUS_STM32_OK):
+        return (ArmState.STATE_IDLE, 0, '')
+    if code == FW_STATUS_NO_SOLVE:
+        return (ArmState.STATE_ERROR, ERR_FW_NO_SOLVE,
+                'firmware: inverse kinematics has no solution')
+    if code == FW_STATUS_ARM_ERR:
+        return (ArmState.STATE_ERROR, ERR_FW_NOT_READY,
+                'firmware: arm not ready (robot_arm_ready==0)')
+    if code == FW_STATUS_BAD_CMD:
+        return (ArmState.STATE_ERROR, ERR_FW_BAD_CMD,
+                'firmware: unknown/bad I2C command byte')
+    return (None, 0, '')
+
 
 # I2C failures before we latch into STATE_ERROR (contract sec 5.5)
 I2C_FAIL_THRESHOLD = 5
@@ -73,6 +122,7 @@ class ArmControllerNode(Node):
         self._error_message = ''
         self._position_valid = False
         self._joint_position = [0.0] * 5
+        self._servo_raw_positions = [0.0] * I2C_JOINT_COUNT  # servo raw (0..1000)
         self._gripper_position = 0.0
 
         # --- emergency stop (contract sec 3.2 / 5.4): latched ---
@@ -81,6 +131,16 @@ class ArmControllerNode(Node):
 
         # --- I2C failure tracking (contract sec 5.5) ---
         self._i2c_fail_count = 0
+
+        # --- last decoded firmware status (for change detection) ---
+        self._last_firmware_status = ''
+
+        # --- command lifecycle / watchdog (contract sec 5.3) ---
+        self._pending_motion = False      # a motion command is awaiting firmware ack
+        self._pending_seq = 0
+        self._pending_sent_ns = 0
+        self._last_fw_contact_ns = 0      # last time a recognized firmware status was read
+        self._last_applied_seq = 0        # highest sequence_id actually executed (for stale/duplicate)
 
         # --- publishers ---
         self.state_pub = self.create_publisher(ArmState, '/arm/state', 10)
@@ -118,8 +178,8 @@ class ArmControllerNode(Node):
                 'joint_4_wrist_pitch', 'joint_5_wrist_roll',
             ],
             'servo_id_map': [
-                'joint_1_base:1', 'joint_2_shoulder:2', 'joint_3_elbow:3',
-                'joint_4_wrist_pitch:4', 'joint_5_wrist_roll:5', 'gripper:6',
+                'joint_1_base:6', 'joint_2_shoulder:5', 'joint_3_elbow:4',
+                'joint_4_wrist_pitch:3', 'joint_5_wrist_roll:2', 'gripper:1',
             ],
             'joint_zero_offsets': [0.0, 0.0, 0.0, 0.0, 0.0],
             'joint_directions': [1, 1, 1, 1, 1],
@@ -129,7 +189,7 @@ class ArmControllerNode(Node):
             'gripper_open_raw': 180.0,
             'end_effector_frame': 'base',
             'end_effector_units': 'mm',
-            'joint_feedback_enabled': False,
+            'joint_feedback_enabled': True,
         }
         for name, val in defaults.items():
             self.declare_parameter(name, val)
@@ -167,10 +227,17 @@ class ArmControllerNode(Node):
         if self.bus is None:
             return None
         try:
-            msg = i2c_msg.read(self._cfg('i2c_address'), STATUS_SIZE)
+            msg = i2c_msg.read(self._cfg('i2c_address'), STATUS_PACKET_SIZE)
             self.bus.i2c_rdwr(msg)
             self._i2c_fail_count = 0
             self.i2c_ok = True
+            # Communication restored: clear a stale latched I2C-lost error so
+            # the typed state machine can reflect the live firmware status.
+            if self._error_code == ERR_I2C_LOST:
+                self._error_code = 0
+                self._error_message = ''
+                if self._state == ArmState.STATE_ERROR:
+                    self._state = ArmState.STATE_IDLE
             return list(msg)
         except Exception as e:
             self._on_i2c_failure('read', e)
@@ -199,7 +266,16 @@ class ArmControllerNode(Node):
                             'estop latched; motion rejected (seq=%d)' % seq)
             return
 
+        # Stale / duplicate / out-of-order command rejection (contract sec 5.3).
+        # sequence_id == 0 is the legacy compatibility sentinel: no tracking.
+        if seq > 0 and seq <= self._last_applied_seq:
+            self._set_error(ERR_STALE_CMD,
+                            'stale or duplicate sequence_id %d (last applied %d)'
+                            % (seq, self._last_applied_seq))
+            return
+
         if cmd.mode == ArmCommand.MODE_STOP:
+            self._last_applied_seq = seq
             self._send_stop(seq)
             return
 
@@ -213,14 +289,18 @@ class ArmControllerNode(Node):
             if not self._validate_end_effector(cmd, seq):
                 return
             if self._send_end_effector(cmd, seq):
+                self._last_applied_seq = seq
                 self._set_state(ArmState.STATE_MOVING, seq)
+                self._arm_pending_motion(seq)
             return
 
         if cmd.mode == ArmCommand.MODE_GRIPPER:
             if not self._validate_gripper(cmd, seq):
                 return
             if self._send_gripper(cmd, seq):
+                self._last_applied_seq = seq
                 self._set_state(ArmState.STATE_MOVING, seq)
+                self._arm_pending_motion(seq)
             return
 
         self._set_error(ERR_UNKNOWN_MODE, 'unknown mode %d (seq=%d)' % (cmd.mode, seq))
@@ -276,8 +356,13 @@ class ArmControllerNode(Node):
         # firmware applies no extra pitch range beyond the target (fail-safe).
         struct.pack_into('<f', buf, 20, cmd.pitch)
         struct.pack_into('<f', buf, 24, cmd.pitch)
-        dur = max(0, min(0xFFFFFFFF, int(cmd.duration_sec)))
-        struct.pack_into('<I', buf, 28, dur)
+        # Firmware forwards byte28 to serial_servo_set_position(), whose 'duration'
+        # argument is uint16 in MILLISECONDS (Lobot MOVE_TIME_WRITE frame, see
+        # serial_servo.c). ArmCommand.duration_sec is in seconds, so convert to ms
+        # and clamp to uint16 range (max ~65.535 s) to avoid truncation on the
+        # firmware side.
+        dur_ms = max(0, min(0xFFFF, int(round(cmd.duration_sec * 1000.0))))
+        struct.pack_into('<I', buf, 28, dur_ms)
         return self._i2c_write(buf)
 
     def _send_gripper(self, cmd, seq):
@@ -330,6 +415,29 @@ class ArmControllerNode(Node):
             self._error_message = ''
         self._state = state
 
+    # ===================== command watchdog (sec 5.3) =====================
+    def _arm_pending_motion(self, seq):
+        self._pending_motion = True
+        self._pending_seq = seq
+        self._pending_sent_ns = self.get_clock().now().nanoseconds
+        # Start the firmware-contact clock at send time so a *silent* firmware
+        # is only detected after the full timeout, never instantly at startup.
+        self._last_fw_contact_ns = self._pending_sent_ns
+
+    def _check_command_timeout(self):
+        # contract sec 5.3 / command_timeout_sec: a motion command that never
+        # receives any recognized firmware status within the timeout is a fault.
+        if not self._pending_motion or self._estop_latched:
+            return
+        now_ns = self.get_clock().now().nanoseconds
+        timeout_ns = int(self._cfg('command_timeout_sec') * 1e9)
+        if now_ns - self._last_fw_contact_ns > timeout_ns:
+            self._pending_motion = False
+            self._set_error(
+                ERR_CMD_TIMEOUT,
+                'no firmware status within %.2fs of command (seq=%d)'
+                % (self._cfg('command_timeout_sec'), self._pending_seq))
+
     # ===================== publishers =====================
     def publish_state(self):
         msg = ArmState()
@@ -350,27 +458,120 @@ class ArmControllerNode(Node):
         # When disabled we do NOT publish /joint_states (contract sec 5.7:
         # never forge joint positions when feedback is unverified).
 
+    def _update_joint_feedback(self, data):
+        """Decode the 32-byte status packet: byte8..31 = float32[6] servo raw
+        positions (ids 1..6). Refresh ArmState.joint_position (5 arm joints,
+        mapped via servo_id_map excluding 'gripper') and mark position_valid."""
+        raw = bytes(data)
+        for i in range(I2C_JOINT_COUNT):
+            off = 8 + i * 4
+            if off + 4 <= len(raw):
+                self._servo_raw_positions[i] = struct.unpack_from('<f', raw, off)[0]
+        # Map raw servo positions to arm joints (rad) for ArmState + /joint_states.
+        zeros = self._cfg('joint_zero_offsets')
+        dirs = self._cfg('joint_directions')
+        rad_per_raw = math.pi * 240.0 / 180.0 / 1000.0  # Lobot: 0..1000 -> 0..240 deg
+        ji = 0
+        for entry in self._cfg('servo_id_map'):
+            if ':' not in entry:
+                continue
+            name, sid_s = entry.split(':', 1)
+            name = name.strip()
+            if name == 'gripper':
+                continue  # gripper state is carried by ArmState.gripper_position
+            sid = int(sid_s)
+            if 1 <= sid <= len(self._servo_raw_positions):
+                pos = self._servo_raw_positions[sid - 1]
+                self._joint_position[ji] = dirs[ji] * (pos - 500.0) * rad_per_raw + zeros[ji]
+            ji += 1
+        self._position_valid = True
+
     def _publish_joint_states(self):
         js = JointState()
         js.header.stamp = self.get_clock().now().to_msg()
-        js.name = list(self._cfg('joint_names')) + ['gripper']
-        # Positions must be filled from REAL hardware feedback. Until verified,
-        # joint_feedback_enabled should stay false; this branch is the verified path.
-        js.position = [0.0] * len(js.name)
+        zeros = self._cfg('joint_zero_offsets')
+        dirs = self._cfg('joint_directions')
+        rad_per_raw = math.pi * 240.0 / 180.0 / 1000.0
+        names = []
+        positions = []
+        ji = 0
+        for entry in self._cfg('servo_id_map'):
+            if ':' not in entry:
+                continue
+            name, sid_s = entry.split(':', 1)
+            name = name.strip()
+            if name == 'gripper':
+                continue  # gripper carried by ArmState.gripper_position
+            sid = int(sid_s)
+            if 1 <= sid <= len(self._servo_raw_positions):
+                pos = self._servo_raw_positions[sid - 1]
+                names.append(name)
+                positions.append(dirs[ji] * (pos - 500.0) * rad_per_raw + zeros[ji])
+            ji += 1
+        js.name = names
+        js.position = positions
         js.velocity = []
         js.effort = []
         self.joint_state_pub.publish(js)
 
     def poll_status(self):
+        # Watchdog runs on every poll, before the estop / transition guards,
+        # so a silent firmware is still detected while estopped or idle.
+        self._check_command_timeout()
+
         data = self._i2c_read_status()
         if data is None:
             return
-        status_str = bytes(data).decode('utf-8', errors='ignore').rstrip('\x00')
+        # Continuously decode real servo positions from the 32-byte status
+        # packet and refresh ArmState.joint_position / position_valid. This runs
+        # on every poll, independent of the status-code transition logic below,
+        # so /joint_states reflects live hardware even when idle.
+        self._update_joint_feedback(data)
+        status_str = bytes(data[:8]).decode('utf-8', errors='ignore').rstrip('\x00')
         m = String()
         m.data = status_str
         self.legacy_status_pub.publish(m)
-        # Hardware feedback is not yet verified -> do not forge joint_position
-        # or position_valid (contract sec 5.7).
+
+        # Reflect the firmware status in the typed state machine (contract
+        # sec 3.3). The emergency-stop latch is authoritative: while latched,
+        # firmware status must not clear it back to MOVING/IDLE.
+        if self._estop_latched:
+            self._last_firmware_status = status_str
+            return
+
+        # Only act on a status *transition* to avoid 10 Hz churn and log spam.
+        if status_str == self._last_firmware_status:
+            return
+        self._last_firmware_status = status_str
+
+        state, code, message = _decode_firmware_status(status_str)
+        if state is None:
+            self.get_logger().warn('unrecognized firmware status: %r' % status_str)
+            return
+
+        # Any recognized firmware status counts as "firmware responded" and
+        # clears the pending-motion watchdog (contract sec 5.3).
+        now_ns = self.get_clock().now().nanoseconds
+        self._last_fw_contact_ns = now_ns
+        if self._pending_motion and now_ns >= self._pending_sent_ns:
+            self._pending_motion = False
+
+        if state == ArmState.STATE_ERROR:
+            self._set_error(code, message)
+        elif state == ArmState.STATE_SUCCEEDED:
+            # Terminal state of a motion we initiated. Only adopt when we are
+            # actually MOVING; a stale ARM_DONE (e.g. at startup) must not
+            # fabricate success. Dedup prevents re-processing the same code.
+            if self._state == ArmState.STATE_MOVING:
+                self._set_state(ArmState.STATE_SUCCEEDED)
+        else:
+            # Adopt MOVING/IDLE from firmware only when not in a node-side
+            # error, so a "OK" from a *prior* command cannot mask a local
+            # validation error (e.g. MODE_JOINT disabled). SUCCEEDED is
+            # included so the next command can re-enter MOVING.
+            if self._state in (ArmState.STATE_IDLE, ArmState.STATE_MOVING,
+                               ArmState.STATE_SUCCEEDED):
+                self._set_state(state)
 
     # ===================== emergency stop (sec 3.2 / 5.4) =====================
     def emergency_stop_callback(self, msg):
@@ -407,6 +608,7 @@ class ArmControllerNode(Node):
         self._estop_request = False
         self._error_code = 0
         self._error_message = ''
+        self._pending_motion = False
         self._set_state(ArmState.STATE_IDLE)
         response.success = True
         response.message = 'error reset; estop cleared'
