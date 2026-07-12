@@ -2,9 +2,9 @@
 """Arm control node implementing the stable ROS2 interface contract.
 
 Stable ROS2 interface (docs/arm-control-interface.md):
-  /arm/command        action_pkg/msg/ArmCommand
+  /arm/command        action_interfaces/msg/ArmCommand
   /arm/emergency_stop std_msgs/msg/Bool            (latched)
-  /arm/state          action_pkg/msg/ArmState
+  /arm/state          action_interfaces/msg/ArmState
   /joint_states       sensor_msgs/msg/JointState   (gated by config)
   /arm/reset_error    std_srvs/srv/Trigger
 
@@ -25,7 +25,7 @@ from std_msgs.msg import String, Bool, Header
 from sensor_msgs.msg import JointState
 from std_srvs.srv import Trigger
 
-from action_pkg.msg import ArmCommand, ArmState
+from action_interfaces.msg import ArmCommand, ArmState
 
 try:
     from smbus2 import SMBus, i2c_msg

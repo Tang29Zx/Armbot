@@ -21,7 +21,7 @@ try:
     from rclpy.parameter import Parameter
     from std_msgs.msg import Bool, String
     from std_srvs.srv import Trigger
-    from action_pkg.msg import ArmCommand, ArmState
+    from action_interfaces.msg import ArmCommand, ArmState
     from action_pkg.action_pkg.arm_controller_node import (
         ArmControllerNode,
         I2C_FAIL_THRESHOLD,
