@@ -105,3 +105,9 @@ MEMORY.md
 /rdk_video_push/logs/
 *.pid
 *.h264
+
+#=========================
+#WorkBuddy
+#=========================
+.workbuddy/
+
