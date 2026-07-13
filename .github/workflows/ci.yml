@@ -3,8 +3,7 @@ name: CI
 on:
   push:
     branches:
-      - main
-      - "feature/**"
+      - "**"
   pull_request:
 
 permissions:
@@ -63,13 +62,10 @@ jobs:
     name: ROS 2 build and tests
     runs-on: ubuntu-22.04
     timeout-minutes: 20
+    container:
+      image: rostooling/setup-ros-docker:ubuntu-jammy-ros-humble-ros-base-latest
 
     steps:
-      - name: Set up ROS 2 Humble
-        uses: ros-tooling/setup-ros@v0.7
-        with:
-          required-ros-distributions: humble
-
       - name: Export ROS 2 Python environment
         shell: bash
         run: |
