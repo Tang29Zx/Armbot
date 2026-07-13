@@ -34,7 +34,7 @@ arm_controller_node:
     gripper_open_raw: 1000.0
 
     end_effector_frame: base
-    end_effector_units: mm
+    end_effector_units: cm
 
     # IK end-effector roll (pitch) window in degrees, forwarded to the firmware's
     # set_pitch_range() inside robot_arm_coordinate_set. Must be a non-degenerate

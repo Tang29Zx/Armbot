@@ -1,4 +1,5 @@
-"""Acceptance tests for the action_pkg arm controller (contract sec 6).
+"""
+Acceptance tests for the action_pkg arm controller contract.
 
 These exercise the typed-interface logic WITHOUT hardware: the I2C layer is
 monkeypatched, so they run wherever ROS2 + this package are built/installed.
@@ -9,41 +10,33 @@ Run (in a ROS2 shell, after colcon build):
 or, from the workspace:
     pytest ros2_ws/src/action_pkg/test/test_arm_controller.py -v
 
-If rclpy / the action_pkg messages are unavailable the whole module is skipped.
+Missing ROS2 dependencies are collection errors so CI cannot silently skip the suite.
 """
 
-import math
-
 import pytest
-
-try:
-    import rclpy
-    from rclpy.parameter import Parameter
-    from std_msgs.msg import Bool, String
-    from std_srvs.srv import Trigger
-    from action_interfaces.msg import ArmCommand, ArmState
-    from action_pkg.action_pkg.arm_controller_node import (
-        ArmControllerNode,
-        I2C_FAIL_THRESHOLD,
-        ERR_JOINT_DISABLED,
-        ERR_NONFINITE_FIELD,
-        ERR_DURATION_RANGE,
-        ERR_GRIPPER_RANGE,
-        ERR_ESTOP_LATCHED,
-        ERR_STALE_CMD,
-        ERR_I2C_LOST,
-        ERR_CMD_TIMEOUT,
-        ERR_FW_NO_SOLVE,
-    )
-    HAVE_ROS = True
-except Exception:  # pragma: no cover - only triggers when ROS2 is absent
-    HAVE_ROS = False
-
-pytestmark = pytest.mark.skipif(not HAVE_ROS, reason="ROS2 / action_pkg not available")
+import rclpy
+from rclpy.parameter import Parameter
+from std_msgs.msg import Bool, String
+from std_srvs.srv import Trigger
+from action_interfaces.msg import ArmCommand, ArmState
+from action_pkg.arm_controller_node import (
+    ArmControllerNode,
+    I2C_FAIL_THRESHOLD,
+    ERR_JOINT_DISABLED,
+    ERR_NONFINITE_FIELD,
+    ERR_DURATION_RANGE,
+    ERR_GRIPPER_RANGE,
+    ERR_ESTOP_LATCHED,
+    ERR_STALE_CMD,
+    ERR_I2C_LOST,
+    ERR_CMD_TIMEOUT,
+    ERR_FW_NO_SOLVE,
+)
 
 
 @pytest.fixture
-def node():
+def node(tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
     rclpy.init()
     n = ArmControllerNode()
     # No real I2C in the test environment: stub the bus so writes "succeed"
@@ -92,6 +85,10 @@ def test_valid_end_effector_moves(node):
     assert node._last_applied_seq == 1
 
 
+def test_end_effector_units_are_centimeters(node):
+    assert node._cfg('end_effector_units') == 'cm'
+
+
 def test_gripper_range_rejected(node):
     node.handle_command(_cmd(ArmCommand.MODE_GRIPPER, seq=1, gripper_position=1.5))
     assert node._state == ArmState.STATE_ERROR
@@ -118,6 +115,25 @@ def test_estop_false_does_not_release(node):
     assert node._estop_latched
     node.emergency_stop_callback(Bool(data=False))
     assert node._estop_latched  # latch stays until /arm/reset_error
+
+
+def test_stop_does_not_clear_latched_estop_state(node):
+    node.emergency_stop_callback(Bool(data=True))
+    node.handle_command(_cmd(ArmCommand.MODE_STOP, seq=1))
+
+    assert node._estop_latched
+    assert node._state == ArmState.STATE_ESTOP
+
+
+def test_reset_error_clears_estop_after_request_is_released(node):
+    node.emergency_stop_callback(Bool(data=True))
+    node.emergency_stop_callback(Bool(data=False))
+
+    resp = node.reset_error_callback(Trigger.Request(), Trigger.Response())
+
+    assert resp.success is True
+    assert node._estop_latched is False
+    assert node._state == ArmState.STATE_IDLE
 
 
 def test_reset_error_clears_joint_disabled(node):
@@ -207,7 +223,7 @@ def test_i2c_failure_threshold_latches_error(node):
     bus.i2c_rdwr.side_effect = OSError('simulated bus error')
     node.bus = bus
     for _ in range(I2C_FAIL_THRESHOLD + 1):
-        node._i2c_write(b'\x00' * 32)
+        ArmControllerNode._i2c_write(node, b'\x00' * 32)
     assert node._error_code == ERR_I2C_LOST
 
 

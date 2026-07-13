@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Arm control node implementing the stable ROS2 interface contract.
+"""
+Arm control node implementing the stable ROS2 interface contract.
 
 Stable ROS2 interface (docs/arm-control-interface.md):
   /arm/command        action_interfaces/msg/ArmCommand
@@ -80,7 +81,8 @@ ERR_FW_BAD_CMD = 0x0022
 
 
 def _decode_firmware_status(code):
-    """Map an 8-char firmware status code to (ArmState, error_code, message).
+    """
+    Map an 8-char firmware status code to (ArmState, error_code, message).
 
     Returns (None, 0, '') for unrecognized codes (leave node state as-is).
     'ARM_OK__'/'SVO_OK__' mean the command was accepted and motion started
@@ -143,7 +145,8 @@ class ArmControllerNode(Node):
         self._pending_seq = 0
         self._pending_sent_ns = 0
         self._last_fw_contact_ns = 0      # last time a recognized firmware status was read
-        self._last_applied_seq = 0        # highest sequence_id actually executed (for stale/duplicate)
+        # Highest sequence_id actually executed, used for stale/duplicate checks.
+        self._last_applied_seq = 0
 
         # --- publishers ---
         self.state_pub = self.create_publisher(ArmState, '/arm/state', 10)
@@ -193,7 +196,7 @@ class ArmControllerNode(Node):
             'pitch_min_deg': -90.0,
             'pitch_max_deg': 90.0,
             'end_effector_frame': 'base',
-            'end_effector_units': 'mm',
+            'end_effector_units': 'cm',
             'joint_feedback_enabled': True,
         }
         for name, val in defaults.items():
@@ -207,7 +210,9 @@ class ArmControllerNode(Node):
         self.bus = None
         self.i2c_ok = False
         if SMBus is None:
-            self.get_logger().error('smbus2 not available; running WITHOUT I2C (install: pip install smbus2)')
+            self.get_logger().error(
+                'smbus2 not available; running WITHOUT I2C '
+                '(install: pip install smbus2)')
             return
         try:
             self.bus = SMBus(self._cfg('i2c_bus'))
@@ -362,7 +367,9 @@ class ArmControllerNode(Node):
         buf = bytearray(CMD_PACKET_SIZE)
         buf[0] = TAG_STOP
         self._i2c_write(buf)
-        self._set_state(ArmState.STATE_IDLE, seq)
+        # A STOP command must never make a latched emergency stop look cleared.
+        state = ArmState.STATE_ESTOP if self._estop_latched else ArmState.STATE_IDLE
+        self._set_state(state, seq)
 
     def _send_end_effector(self, cmd, seq):
         buf = bytearray(CMD_PACKET_SIZE)
@@ -420,7 +427,11 @@ class ArmControllerNode(Node):
 
     # ===================== state helpers =====================
     def _set_error(self, code, message):
-        self._state = ArmState.STATE_ERROR
+        # ESTOP is the authoritative top-level state while latched. Keep the
+        # detailed error code/message for diagnostics without downgrading the
+        # published safety state to ERROR.
+        self._state = (ArmState.STATE_ESTOP
+                       if self._estop_latched else ArmState.STATE_ERROR)
         self._error_code = code
         self._error_message = message
         self.get_logger().error('[seq=%d] err=0x%04X %s'
@@ -482,9 +493,12 @@ class ArmControllerNode(Node):
         # never forge joint positions when feedback is unverified).
 
     def _update_joint_feedback(self, data):
-        """Decode the 32-byte status packet: byte8..31 = float32[6] servo raw
-        positions (ids 1..6). Refresh ArmState.joint_position (5 arm joints,
-        mapped via servo_id_map excluding 'gripper') and mark position_valid."""
+        """
+        Decode joint positions from the 32-byte status packet.
+
+        Bytes 8..31 contain float32[6] servo raw positions for ids 1..6.
+        Refresh the five arm joints using servo_id_map and mark them valid.
+        """
         raw = bytes(data)
         for i in range(I2C_JOINT_COUNT):
             off = 8 + i * 4
@@ -554,8 +568,11 @@ class ArmControllerNode(Node):
         # Diagnostic: log the raw 8-byte status (including recognized codes) on
         # every change, so a silent/non-ACKing firmware is visible during debug.
         if status_str != self._last_logged_raw:
-            self.get_logger().info('[raw firmware status] %r (servo1_raw=%.1f, servo6_base_raw=%.1f)'
-                                   % (status_str, self._servo_raw_positions[0], self._servo_raw_positions[5]))
+            self.get_logger().info(
+                '[raw firmware status] %r '
+                '(servo1_raw=%.1f, servo6_base_raw=%.1f)'
+                % (status_str, self._servo_raw_positions[0],
+                   self._servo_raw_positions[5]))
             self._last_logged_raw = status_str
         m = String()
         m.data = status_str
@@ -565,6 +582,7 @@ class ArmControllerNode(Node):
         # sec 3.3). The emergency-stop latch is authoritative: while latched,
         # firmware status must not clear it back to MOVING/IDLE.
         if self._estop_latched:
+            self._state = ArmState.STATE_ESTOP
             self._last_firmware_status = status_str
             return
 
@@ -627,8 +645,10 @@ class ArmControllerNode(Node):
     # ===================== reset_error service (sec 3.5) =====================
     def reset_error_callback(self, request, response):
         problems = []
-        if self._estop_request or self._estop_latched:
-            problems.append('estop active')
+        # The latch itself is what this explicit service clears. Reset is only
+        # blocked while the external estop request is still asserted.
+        if self._estop_request:
+            problems.append('estop request active')
         if not self.i2c_ok:
             problems.append('i2c not ok')
         if self._state == ArmState.STATE_MOVING:
@@ -660,7 +680,9 @@ class ArmControllerNode(Node):
         try:
             if ctype == 'ARM':
                 if len(parts) < 8:
-                    self.get_logger().error('legacy ARM needs 7 params (x y z pitch min_pitch max_pitch time)')
+                    self.get_logger().error(
+                        'legacy ARM needs 7 params '
+                        '(x y z pitch min_pitch max_pitch time)')
                     return
                 x, y, z, pitch, _min, _max, t = map(float, parts[1:8])
                 cmd = ArmCommand()

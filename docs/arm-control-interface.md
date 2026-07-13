@@ -77,7 +77,7 @@ STOP:
   byte 0       = 'S'
 ```
 
-现有代码没有确认各数值的物理单位，也没有结构化关节反馈。因此当前字符串接口只用于联调，不作为稳定公共 API。
+末端坐标 `x/y/z` 的固件单位已确认为厘米（cm）；其他字段仍应以类型化接口和配置契约为准。当前字符串接口只用于联调，不作为稳定公共 API。
 
 ## 3. 稳定 ROS2 接口
 
@@ -108,7 +108,7 @@ uint32 sequence_id
 字段规则：
 
 - `MODE_STOP`：忽略其他目标字段，立即请求安全停止；
-- `MODE_END_EFFECTOR`：使用 `x/y/z/pitch`，坐标系和单位由硬件配置固定；
+- `MODE_END_EFFECTOR`：使用 `x/y/z/pitch`，其中 `x/y/z` 单位固定为厘米（cm）；
 - `MODE_JOINT`：使用 `joint_position`，单位 rad；
 - `MODE_GRIPPER`：使用 `gripper_position`，规范范围 `[0, 1]`；
 - `duration_sec`：期望执行时间，必须为有限正数并限制在配置范围内；
@@ -236,7 +236,7 @@ end_effector_units
 - 当前只有字符串命令，没有 `ArmCommand` 和 `ArmState`；
 - `/status_topic` 只有 8 字节文本，不能表达结构化执行状态；
 - 没有真实关节位置反馈契约；
-- 坐标、角度和时间单位尚未与 STM32 固件确认；
+- 末端 `x/y/z` 单位已确认为厘米（cm），pitch 等剩余物理语义仍需与 STM32 固件保持一致；
 - 舵机 ID 映射、软限位、急停和通信失败行为尚未完成实机验证。
 
 这些缺口属于机械臂控制层，应在本分支内解决。

@@ -18,6 +18,7 @@ setup(
     maintainer_email='Tang29Zx@outlook.com',
     description='LeArm mecanum chassis driver and odometry for ROS2',
     license='MIT',
+    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
             'chassis_control_node = chassis_control.chassis_control_node:main',

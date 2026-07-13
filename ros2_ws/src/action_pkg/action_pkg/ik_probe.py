@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Armbot IK 可达工作空间探测脚本。
+"""
+Armbot IK workspace probe.
+
+用于探测机械臂逆运动学的可达工作空间。
 
 发送一组 MODE_END_EFFECTOR (mode=1) 坐标点，逐一判断固件逆解是否可解
 （OK / NO_SOLVE / TIMEOUT）。坐标单位为厘米（cm），与固件约定一致；

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Gripper travel-range probe (bypasses ROS node, talks I2C directly).
+"""
+Gripper travel-range probe that talks to I2C directly.
 
 Stops the ROS node first (only one I2C master may own /dev/i2c-5 at a time).
 Sends SERVO commands (tag 'P', id=1) with a sweep of raw values and reads
@@ -19,7 +20,7 @@ Run on RDK (after Ctrl-C the arm_controller_node):
 """
 import time
 import struct
-from smbus2 import SMBus, I2cRdwrError, i2c_msg
+from smbus2 import SMBus, i2c_msg
 
 
 def read_status(bus):

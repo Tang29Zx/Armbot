@@ -19,6 +19,7 @@ class VideoPusher:
         self._stop_event = threading.Event()
         self._monitor_thread: threading.Thread | None = None
         self._restart_count = 0
+        self._last_exit_code = 0
         self._registered_exit = False
 
     def start_stream(self) -> None:
@@ -29,6 +30,7 @@ class VideoPusher:
 
             self._stop_event.clear()
             self._restart_count = 0
+            self._last_exit_code = 0
             self._start_process()
             self._ensure_monitor_thread()
             self._register_exit_handlers()
@@ -40,28 +42,23 @@ class VideoPusher:
 
     def restart_stream(self) -> None:
         self.logger.info("Restarting stream")
-        with self._lock:
-            self._stop_process()
-            self._stop_event.clear()
-            self._restart_count = 0
-            self._start_process()
-            self._ensure_monitor_thread()
+        self.stop_stream()
+        monitor_thread = self._monitor_thread
+        if monitor_thread and monitor_thread is not threading.current_thread():
+            monitor_thread.join()
+        self.start_stream()
 
     def is_running(self) -> bool:
         return self.process is not None and self.process.poll() is None
 
     def wait(self) -> int:
-        while True:
-            with self._lock:
-                process = self.process
-            if process is None:
-                return 0
-
-            exit_code = process.wait()
-            if self._stop_event.is_set():
-                return exit_code
-
-            time.sleep(0.2)
+        monitor_thread = self._monitor_thread
+        if monitor_thread is None:
+            return self._last_exit_code
+        if monitor_thread is threading.current_thread():
+            raise RuntimeError("VideoPusher.wait() cannot run in the monitor thread")
+        monitor_thread.join()
+        return self._last_exit_code
 
     def build_command(self) -> list[str]:
         video = self.config["video"]
@@ -205,6 +202,7 @@ class VideoPusher:
                 continue
 
             exit_code = process.wait()
+            self._last_exit_code = exit_code
             self.logger.info("Stream process exited with code=%s", exit_code)
 
             with self._lock:
@@ -236,10 +234,10 @@ class VideoPusher:
                 max_restart_count,
                 restart_interval_sec,
             )
-            time.sleep(restart_interval_sec)
-            if not self._stop_event.is_set():
-                with self._lock:
-                    self._start_process()
+            if self._stop_event.wait(restart_interval_sec):
+                break
+            with self._lock:
+                self._start_process()
 
     def _pipe_output(self, process: subprocess.Popen[str]) -> None:
         if process.stdout is None:

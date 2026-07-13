@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Standalone firmware probe — bypasses the ROS node entirely.
+"""
+Standalone firmware probe that bypasses the ROS node entirely.
 
 Purpose: prove whether the firmware currently running on the STM32 actually
 processes I2C ARM/STOP commands, or whether the burned binary is stale / the
@@ -72,8 +73,11 @@ def build_arm(x=20.0, y=0.0, z=15.0, pitch=0.0, min_pitch=-90.0, max_pitch=90.0,
 
 
 def watch(bus, label, duration, settle=0.15, nok=1):
-    """Write already done by caller; watch status for `duration` seconds.
-    Returns the set of distinct status strings seen (excluding NAK)."""
+    """
+    Watch status for ``duration`` seconds after a caller write.
+
+    Return the distinct status strings seen, excluding NAK responses.
+    """
     print('\n[probe] --- %s (watching %.0fs, %.2fs settle) ---' % (label, duration, settle))
     time.sleep(settle)
     seen = {}

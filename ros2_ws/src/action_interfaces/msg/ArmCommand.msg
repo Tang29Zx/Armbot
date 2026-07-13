@@ -10,7 +10,7 @@ std_msgs/Header header
 
 uint8 mode
 
-# MODE_END_EFFECTOR uses x/y/z/pitch; units fixed by hardware config.
+# MODE_END_EFFECTOR uses x/y/z in centimeters (cm); pitch follows firmware config.
 float32 x
 float32 y
 float32 z
