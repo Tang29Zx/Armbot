@@ -4,13 +4,12 @@ import math
 import time
 from unittest.mock import MagicMock
 
+from action_interfaces.msg import ArmState
+from action_pkg.arm_teleop_node import ArmTeleopNode
 import pytest
 import rclpy
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import Joy
-
-from action_interfaces.msg import ArmState
-from action_pkg.arm_teleop_node import ArmTeleopNode
 
 
 def _joy(*, axes=None, buttons=None):

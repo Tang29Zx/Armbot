@@ -1,5 +1,16 @@
 # Armbot
 
+## RDK ROS 2 构建
+
+RDK 上使用脚本构建机械臂接口与控制包：
+
+```bash
+bash scripts/build-rdk-ros2.sh
+```
+
+脚本会加载 ROS 2 Humble，优先使用兼容的 Ubuntu 系统 Python 包，并以
+symlink 模式构建 `action_interfaces` 和 `action_pkg`。
+
 ## Git Hooks
 
 默认分支的 GitHub Ruleset 为仓库管理员保留 `Always bypass`，便于管理员在修改 README、文案等低风险内容或处理紧急情况时直接推送。功能代码仍推荐通过功能分支和 Pull Request 合并。

@@ -18,8 +18,8 @@ firmware is busy re-arming its I2C transmit buffer. This probe SLEEPS after
 each write and RETRIES on Remote I/O, so it surfaces the real status the
 firmware eventually reports.
 """
-import time
 import struct
+import time
 
 try:
     from smbus2 import SMBus, i2c_msg
@@ -121,12 +121,12 @@ def main():
     stop[0] = ord('S')
     write_cmd(bus, stop)
     print('[probe] wrote STOP')
-    stop_seen = watch(bus, "after STOP", 3.0)
+    stop_seen = watch(bus, 'after STOP', 3.0)
 
     # --- ARM: the real test ---
     write_cmd(bus, build_arm())
     print('[probe] wrote ARM (x=20 y=0 z=15 dur=2000ms)')
-    arm_seen = watch(bus, "after ARM", 8.0)
+    arm_seen = watch(bus, 'after ARM', 8.0)
 
     bus.close()
     print('\n[probe] === SUMMARY ===')

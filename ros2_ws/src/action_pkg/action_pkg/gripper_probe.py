@@ -18,9 +18,10 @@ Run on RDK (after Ctrl-C the arm_controller_node):
   source ~/Armbot/ros2_ws/install/setup.bash
   python3 ~/Armbot/ros2_ws/src/action_pkg/action_pkg/gripper_probe.py
 """
-import time
 import struct
-from smbus2 import SMBus, i2c_msg
+import time
+
+from smbus2 import i2c_msg, SMBus
 
 
 def read_status(bus):

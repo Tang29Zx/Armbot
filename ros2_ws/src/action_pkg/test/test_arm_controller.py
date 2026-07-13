@@ -15,25 +15,25 @@ Missing ROS2 dependencies are collection errors; CI cannot skip the suite.
 
 import struct
 
+from action_interfaces.msg import ArmCommand, ArmState
+from action_pkg.arm_controller_node import (
+    ArmControllerNode,
+    ERR_CMD_TIMEOUT,
+    ERR_DURATION_RANGE,
+    ERR_ESTOP_LATCHED,
+    ERR_FW_NO_SOLVE,
+    ERR_GRIPPER_RANGE,
+    ERR_I2C_LOST,
+    ERR_JOINT_DISABLED,
+    ERR_NONFINITE_FIELD,
+    ERR_STALE_CMD,
+    I2C_FAIL_THRESHOLD,
+)
 import pytest
 import rclpy
 from rclpy.parameter import Parameter
 from std_msgs.msg import Bool, String
 from std_srvs.srv import Trigger
-from action_interfaces.msg import ArmCommand, ArmState
-from action_pkg.arm_controller_node import (
-    ArmControllerNode,
-    I2C_FAIL_THRESHOLD,
-    ERR_JOINT_DISABLED,
-    ERR_NONFINITE_FIELD,
-    ERR_DURATION_RANGE,
-    ERR_GRIPPER_RANGE,
-    ERR_ESTOP_LATCHED,
-    ERR_STALE_CMD,
-    ERR_I2C_LOST,
-    ERR_CMD_TIMEOUT,
-    ERR_FW_NO_SOLVE,
-)
 
 
 @pytest.fixture
@@ -210,7 +210,8 @@ def test_reset_error_blocked_while_estop(node):
 
 # ===================== sec 5.3 stale / duplicate =====================
 def test_stale_and_duplicate_sequence_rejected(node):
-    base = dict(x=0.0, y=0.0, z=0.0, pitch=0.0, duration_sec=1.0)
+    base = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'pitch': 0.0,
+            'duration_sec': 1.0}
     node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=5, **base))
     assert node._last_applied_seq == 5
 
@@ -228,7 +229,8 @@ def test_stale_and_duplicate_sequence_rejected(node):
 
 
 def test_legacy_seq_zero_bypasses_stale_check(node):
-    base = dict(x=0.0, y=0.0, z=0.0, pitch=0.0, duration_sec=1.0)
+    base = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'pitch': 0.0,
+            'duration_sec': 1.0}
     node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=5, **base))
     # seq 0 is the legacy sentinel and must NOT be rejected as stale
     node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=0, **base))

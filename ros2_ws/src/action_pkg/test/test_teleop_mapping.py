@@ -3,14 +3,14 @@
 import math
 
 from action_pkg.teleop_mapping import (
-    MODE_ARM,
-    MODE_GRIPPER,
-    Target,
     apply_deadzone,
     controls_neutral,
     integrate_target,
     joints_near_home,
+    MODE_ARM,
+    MODE_GRIPPER,
     rising_edge,
+    Target,
     trigger_pressed,
     valid_joy,
 )

@@ -20,14 +20,12 @@ import math
 import struct
 import time
 
+from action_interfaces.msg import ArmCommand, ArmState
 import rclpy
 from rclpy.node import Node
-
-from std_msgs.msg import String, Bool, Header
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Bool, Header, String
 from std_srvs.srv import Trigger
-
-from action_interfaces.msg import ArmCommand, ArmState
 
 try:
     from smbus2 import SMBus, i2c_msg
