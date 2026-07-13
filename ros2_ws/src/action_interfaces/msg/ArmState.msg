@@ -17,7 +17,7 @@ uint32 sequence_id
 # Stable joint feedback (rad). Only meaningful when position_valid is true.
 float32[5] joint_position
 
-# Gripper feedback, same [0, 1] canonical range as ArmCommand.gripper_position.
+# Gripper feedback, same 0=open, 1=closed range as ArmCommand.gripper_position.
 float32 gripper_position
 
 # If false, callers must NOT treat the position arrays as real feedback.

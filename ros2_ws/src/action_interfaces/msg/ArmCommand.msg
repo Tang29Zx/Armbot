@@ -19,7 +19,7 @@ float32 pitch
 # MODE_JOINT uses joint_position; unit rad. Disabled until servo mapping confirmed.
 float32[5] joint_position
 
-# MODE_GRIPPER uses gripper_position; canonical range [0, 1].
+# MODE_GRIPPER uses gripper_position; 0=open, 1=closed.
 float32 gripper_position
 
 # Expected execution time (seconds). Must be finite positive and within config range.

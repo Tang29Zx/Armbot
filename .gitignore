@@ -96,7 +96,6 @@ HybrIK/
 #Codex
 #=========================
 .codex
-MEMORY.md
 
 #=========================
 #RDK video runtime artifacts
@@ -109,4 +108,3 @@ MEMORY.md
 #WorkBuddy
 #=========================
 .workbuddy/
-

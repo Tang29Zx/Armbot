@@ -1,0 +1,25 @@
+arm_teleop_node:
+  ros__parameters:
+    shadow_mode: false
+    control_rate_hz: 10.0
+    joy_timeout_sec: 0.5
+    state_timeout_sec: 0.5
+    deadzone: 0.12
+    trigger_deadzone: 0.05
+
+    translation_speed_cm_sec: 1.0
+    pitch_speed_deg_sec: 10.0
+    gripper_speed_sec: 0.5
+    command_duration_sec: 0.12
+    home_duration_sec: 2.0
+
+    home_target: [15.0, 0.0, 2.0, -54.48]
+    home_joint_deg: [0.0, 112.08, -89.04, -77.52, 0.0]
+    home_joint_tolerance_deg: 5.0
+    home_stable_samples: 3
+    chord_hold_sec: 1.0
+
+    x_limits_cm: [10.0, 20.0]
+    y_limits_cm: [-10.0, 10.0]
+    z_limits_cm: [0.0, 25.0]
+    pitch_limits_deg: [-90.0, 10.0]

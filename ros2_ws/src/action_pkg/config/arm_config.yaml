@@ -25,13 +25,15 @@ arm_controller_node:
       joint_5_wrist_roll: 2
       gripper: 1
 
-    joint_zero_offsets: [0.0, 0.0, 0.0, 0.0, 0.0]
-    joint_directions: [1, 1, 1, 1, 1]
+    # Derived from STM32 theta2servo()/robot_arm_roll_set() for serial servos.
+    joint_zero_offsets: [0.0, 1.5707963268, 0.0, 0.0, 0.0]
+    joint_directions: [1, -1, 1, 1, -1]
     joint_lower_limits: [-3.14159, -3.14159, -3.14159, -3.14159, -3.14159]
     joint_upper_limits: [3.14159, 3.14159, 3.14159, 3.14159, 3.14159]
 
-    gripper_closed_raw: 0.0
-    gripper_open_raw: 1000.0
+    # STM32 claw mapping: raw 200=open, raw 700=closed.
+    gripper_closed_raw: 700.0
+    gripper_open_raw: 200.0
 
     end_effector_frame: base
     end_effector_units: cm

@@ -72,10 +72,14 @@ SERVO:
   byte 0       = 'P'
   byte 4       = servo_id, uint8, range 1..6
   byte 8..11   = angle, float32 little-endian
+  byte 12..15  = duration, uint32 little-endian milliseconds
 
 STOP:
   byte 0       = 'S'
 ```
+
+`SERVO duration=0` 由固件按兼容默认值 `1000 ms` 处理；固件实际传给串口
+舵机的时长限制为 `1..65535 ms`。
 
 末端坐标 `x/y/z` 的固件单位已确认为厘米（cm）；其他字段仍应以类型化接口和配置契约为准。当前字符串接口只用于联调，不作为稳定公共 API。
 
@@ -110,7 +114,8 @@ uint32 sequence_id
 - `MODE_STOP`：忽略其他目标字段，立即请求安全停止；
 - `MODE_END_EFFECTOR`：使用 `x/y/z/pitch`，其中 `x/y/z` 单位固定为厘米（cm）；
 - `MODE_JOINT`：使用 `joint_position`，单位 rad；
-- `MODE_GRIPPER`：使用 `gripper_position`，规范范围 `[0, 1]`；
+- `MODE_GRIPPER`：使用 `gripper_position`，规范范围 `[0, 1]`，其中
+  `0` 表示完全张开、`1` 表示完全闭合；
 - `duration_sec`：期望执行时间，必须为有限正数并限制在配置范围内；
 - `sequence_id`：调用方生成的递增编号，用于关联命令和状态。
 
@@ -148,7 +153,8 @@ string error_message
 字段规则：
 
 - `sequence_id` 对应最近接受或完成的命令；
-- `gripper_position` 使用与命令相同的 `[0, 1]` 规范范围；
+- `gripper_position` 使用与命令相同的 `[0, 1]` 规范范围：`0=open`、
+  `1=closed`；
 - `position_valid=false` 时，调用方不得把位置数组当作真实反馈；
 - `STATE_SUCCEEDED` 表示命令完成，不代表上层任务成功；
 - `error_code` 是稳定机器接口，`error_message` 只用于诊断。
@@ -203,7 +209,8 @@ end_effector_frame
 end_effector_units
 ```
 
-现有代码只证明舵机 ID 范围为 1～6，尚未验证它们与 5 个机械臂关节和夹爪的对应关系。映射确认前不得启用 `MODE_JOINT`。
+STM32 源码已确认串口舵机映射为：底座到腕部依次使用 id 6～2，夹爪使用
+id 1。关节直接控制仍保持禁用，直到关节限位和实机方向完成独立验收。
 
 ## 5. 安全行为
 

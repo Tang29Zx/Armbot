@@ -187,12 +187,12 @@ class ArmControllerNode(Node):
                 'joint_1_base:6', 'joint_2_shoulder:5', 'joint_3_elbow:4',
                 'joint_4_wrist_pitch:3', 'joint_5_wrist_roll:2', 'gripper:1',
             ],
-            'joint_zero_offsets': [0.0, 0.0, 0.0, 0.0, 0.0],
-            'joint_directions': [1, 1, 1, 1, 1],
+            'joint_zero_offsets': [0.0, math.pi / 2.0, 0.0, 0.0, 0.0],
+            'joint_directions': [1, -1, 1, 1, -1],
             'joint_lower_limits': [-3.14159, -3.14159, -3.14159, -3.14159, -3.14159],
             'joint_upper_limits': [3.14159, 3.14159, 3.14159, 3.14159, 3.14159],
-            'gripper_closed_raw': 0.0,
-            'gripper_open_raw': 1000.0,
+            'gripper_closed_raw': 700.0,
+            'gripper_open_raw': 200.0,
             'pitch_min_deg': -90.0,
             'pitch_max_deg': 90.0,
             'end_effector_frame': 'base',
@@ -401,13 +401,21 @@ class ArmControllerNode(Node):
             self._set_error(ERR_GRIPPER_UNMAPPED,
                             'gripper servo id not in servo_id_map (seq=%d)' % seq)
             return False
-        closed = float(self._cfg('gripper_closed_raw'))
         opened = float(self._cfg('gripper_open_raw'))
-        raw = closed + cmd.gripper_position * (opened - closed)
+        closed = float(self._cfg('gripper_closed_raw'))
+        raw = opened + cmd.gripper_position * (closed - opened)
         buf = bytearray(CMD_PACKET_SIZE)
         buf[0] = TAG_SERVO
         buf[4] = sid & 0xFF
         struct.pack_into('<f', buf, 8, raw)
+        # P packet byte12..15 carries move time in milliseconds. Keep one
+        # second as the compatibility default for legacy callers that leave
+        # duration_sec at its zero-initialized value.
+        duration = (cmd.duration_sec
+                    if math.isfinite(cmd.duration_sec) and cmd.duration_sec > 0
+                    else 1.0)
+        dur_ms = max(1, min(0xFFFF, int(round(duration * 1000.0))))
+        struct.pack_into('<I', buf, 12, dur_ms)
         ok = self._i2c_write(buf)
         if ok:
             self._gripper_position = cmd.gripper_position
@@ -521,6 +529,14 @@ class ArmControllerNode(Node):
                 pos = self._servo_raw_positions[sid - 1]
                 self._joint_position[ji] = dirs[ji] * (pos - 500.0) * rad_per_raw + zeros[ji]
             ji += 1
+        # Servo id 1 is the gripper. Its canonical contract is 0=open,
+        # 1=closed, so decode real feedback instead of echoing the last command.
+        opened = float(self._cfg('gripper_open_raw'))
+        closed = float(self._cfg('gripper_closed_raw'))
+        span = closed - opened
+        if abs(span) > 1e-9:
+            actual = (self._servo_raw_positions[0] - opened) / span
+            self._gripper_position = max(0.0, min(1.0, actual))
         self._position_valid = True
 
     def _publish_joint_states(self):
@@ -702,10 +718,10 @@ class ArmControllerNode(Node):
                 if gid is not None and sid == gid:
                     cmd = ArmCommand()
                     cmd.mode = ArmCommand.MODE_GRIPPER
-                    closed = float(self._cfg('gripper_closed_raw'))
                     opened = float(self._cfg('gripper_open_raw'))
-                    span = opened - closed
-                    pos = 0.0 if abs(span) < 1e-9 else (angle - closed) / span
+                    closed = float(self._cfg('gripper_closed_raw'))
+                    span = closed - opened
+                    pos = 0.0 if abs(span) < 1e-9 else (angle - opened) / span
                     cmd.gripper_position = max(0.0, min(1.0, pos))
                     cmd.sequence_id = 0
                     self.handle_command(cmd)

@@ -6,12 +6,14 @@ monkeypatched, so they run wherever ROS2 + this package are built/installed.
 
 Run (in a ROS2 shell, after colcon build):
     source install/setup.bash
-    pytest $(ros2 pkg prefix --share action_pkg)/../src/action_pkg/test/test_arm_controller.py -v
+    pytest ACTION_PKG_SOURCE/test/test_arm_controller.py -v
 or, from the workspace:
     pytest ros2_ws/src/action_pkg/test/test_arm_controller.py -v
 
-Missing ROS2 dependencies are collection errors so CI cannot silently skip the suite.
+Missing ROS2 dependencies are collection errors; CI cannot skip the suite.
 """
+
+import struct
 
 import pytest
 import rclpy
@@ -66,14 +68,16 @@ def test_mode_joint_disabled(node):
 
 
 def test_nonfinite_rejected(node):
-    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=1, x=float('nan')))
+    node.handle_command(_cmd(
+        ArmCommand.MODE_END_EFFECTOR, seq=1, x=float('nan')))
     assert node._state == ArmState.STATE_ERROR
     assert node._error_code == ERR_NONFINITE_FIELD
 
 
 def test_duration_range_rejected(node):
     node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=1,
-                             x=0.0, y=0.0, z=0.0, pitch=0.0, duration_sec=999.0))
+                             x=0.0, y=0.0, z=0.0, pitch=0.0,
+                             duration_sec=999.0))
     assert node._state == ArmState.STATE_ERROR
     assert node._error_code == ERR_DURATION_RANGE
 
@@ -90,9 +94,61 @@ def test_end_effector_units_are_centimeters(node):
 
 
 def test_gripper_range_rejected(node):
-    node.handle_command(_cmd(ArmCommand.MODE_GRIPPER, seq=1, gripper_position=1.5))
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER, seq=1, gripper_position=1.5))
     assert node._state == ArmState.STATE_ERROR
     assert node._error_code == ERR_GRIPPER_RANGE
+
+
+@pytest.mark.parametrize('position, expected_raw', [
+    (0.0, 200.0),
+    (0.5, 450.0),
+    (1.0, 700.0),
+])
+def test_gripper_open_close_contract(node, position, expected_raw):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER,
+        seq=1,
+        gripper_position=position,
+        duration_sec=0.12,
+    ))
+    assert struct.unpack_from('<f', writes[-1], 8)[0] == expected_raw
+    assert struct.unpack_from('<I', writes[-1], 12)[0] == 120
+
+
+def test_gripper_duration_defaults_to_one_second_for_legacy_callers(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER,
+        seq=1,
+        gripper_position=0.5,
+    ))
+    assert struct.unpack_from('<I', writes[-1], 12)[0] == 1000
+
+
+def test_real_gripper_and_home_joint_feedback(node):
+    packet = bytearray(32)
+    reset_raw = [200.0, 500.0, 177.0, 129.0, 408.0, 500.0]
+    for index, value in enumerate(reset_raw):
+        struct.pack_into('<f', packet, 8 + index * 4, value)
+
+    node._update_joint_feedback(packet)
+
+    assert node._gripper_position == pytest.approx(0.0)
+    assert node._joint_position == pytest.approx([
+        0.0,
+        1.95616,
+        -1.55404,
+        -1.35298,
+        0.0,
+    ], abs=1e-4)
+
+    struct.pack_into('<f', packet, 8, 450.0)
+    node._update_joint_feedback(packet)
+    assert node._gripper_position == pytest.approx(0.5)
 
 
 # ===================== sec 3.2 / 5.4 emergency stop =====================
