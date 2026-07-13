@@ -70,6 +70,13 @@ jobs:
         with:
           required-ros-distributions: humble
 
+      - name: Export ROS 2 Python environment
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
+          python3 -c 'import rclpy; print(rclpy.__file__)'
+
       - name: Build and test ROS 2 packages
         uses: ros-tooling/action-ros-ci@v0.4
         with:
