@@ -585,6 +585,32 @@ ROS 无法判断读到的 `ARM_OK__` 或 `ARM_DONE` 属于当前命令还是上�
 关闭标准：在固件构建/烧录记录中保存源码 commit，并通过状态版本或产物哈希确认
 板上二进制；不要在版本未绑定前把当前状态标记为硬件验收完成。
 
+## P2：GitHub Actions 导入顺序检查失败
+
+状态：**本地已验证，待 GitHub Actions 验证**
+
+### 现象与根因
+
+- 2026-07-14：分支 `fix/arm-control-v2@f428633` 的 GitHub Actions run
+  `29345116075` 在 `ROS 2 build and tests` 失败。
+- 失败仅为 `test_arm_controller.py:19:1 I101`：测试模块导入名称未满足 CI 中
+  `flake8-import-order` 的字典序要求；控制逻辑测试本身均已通过。
+- 本机插件版本未报告该错误，说明本地与 CI 的 import-order 检查存在版本差异。
+
+### 已修改
+
+- 按 CI 明确给出的顺序调整 `ERR_FW_MOTION_TIMEOUT/ERR_FW_NO_SOLVE` 与
+  `FW_ERROR_MOTION_TIMEOUT/FW_ERROR_NO_IK_SOLUTION`，不改变运行逻辑。
+- 2026-07-14：在 `action_pkg` 包目录运行独立 flake8 测试为 1 passed；随后
+  `colcon test --packages-select action_pkg` 与 `colcon test-result --verbose`
+  为 65 tests、0 failures、0 errors、1 skipped。
+
+### 关闭标准
+
+- 本地 flake8 与全部 ROS 测试通过。
+- 修复提交推送后，同一分支的新 GitHub Actions run 成功。
+- 用户确认 CI 已恢复后归档。
+
 ## 建议调试顺序
 
 1. 保持 Xbox 遥控禁用。
