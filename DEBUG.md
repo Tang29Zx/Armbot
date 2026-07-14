@@ -587,7 +587,7 @@ ROS 无法判断读到的 `ARM_OK__` 或 `ARM_DONE` 属于当前命令还是上�
 
 ## P2：GitHub Actions 导入顺序检查失败
 
-状态：**本地已验证，待 GitHub Actions 验证**
+状态：**已验证，待用户验收**
 
 ### 现象与根因
 
@@ -604,6 +604,8 @@ ROS 无法判断读到的 `ARM_OK__` 或 `ARM_DONE` 属于当前命令还是上�
 - 2026-07-14：在 `action_pkg` 包目录运行独立 flake8 测试为 1 passed；随后
   `colcon test --packages-select action_pkg` 与 `colcon test-result --verbose`
   为 65 tests、0 failures、0 errors、1 skipped。
+- 2026-07-14：修复提交 `cf6b35f` 已推送；GitHub Actions run `29345779232`
+  的 `Software checks` 与 `ROS 2 build and tests` 均成功，远端 CI 已恢复。
 
 ### 关闭标准
 
