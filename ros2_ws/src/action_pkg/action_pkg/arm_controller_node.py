@@ -775,6 +775,16 @@ class ArmControllerNode(Node):
             self._clear_active_motion()
             self._last_sequence_id = failed_seq
             code, message = _firmware_error_details(error)
+            if error == FW_ERROR_SERVO_FEEDBACK_FAILED:
+                invalid_ids = [
+                    str(index + 1)
+                    for index, value in enumerate(self._servo_raw_positions)
+                    if not math.isfinite(value) or not 0.0 < value <= 1000.0
+                ]
+                message += '; invalid_servo_ids=%s; servo_raw=%s' % (
+                    ','.join(invalid_ids) or 'unknown',
+                    ','.join('%.0f' % value
+                             for value in self._servo_raw_positions))
             self._set_error(code, '%s (wire_id=%d)' % (message, wire_id))
 
     # ===================== emergency stop (sec 3.2 / 5.4) =====================

@@ -25,6 +25,7 @@ from action_pkg.arm_controller_node import (
     ERR_FW_NO_SOLVE,
     ERR_FW_PROTOCOL,
     ERR_FW_RESTARTED,
+    ERR_FW_SERVO_FEEDBACK,
     ERR_GRIPPER_RANGE,
     ERR_I2C_LOST,
     ERR_JOINT_DISABLED,
@@ -32,6 +33,7 @@ from action_pkg.arm_controller_node import (
     ERR_STALE_CMD,
     FW_ERROR_MOTION_TIMEOUT,
     FW_ERROR_NO_IK_SOLUTION,
+    FW_ERROR_SERVO_FEEDBACK_FAILED,
     FW_LIFECYCLE_ACCEPTED,
     FW_LIFECYCLE_COMPLETED,
     FW_LIFECYCLE_FAILED,
@@ -357,6 +359,20 @@ def test_matching_motion_timeout_is_never_success(node):
     assert node._state == ArmState.STATE_ERROR
     assert node._error_code == ERR_FW_MOTION_TIMEOUT
     assert node._last_sequence_id == 4
+
+
+def test_feedback_failure_reports_invalid_servo_ids(node):
+    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=5,
+                             x=0.0, y=0.0, z=0.0, pitch=0.0,
+                             duration_sec=1.0))
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_FAILED, node._active_wire_id,
+        FW_ERROR_SERVO_FEEDBACK_FAILED,
+        positions=[500.0, 0.0, 500.0, 500.0, 500.0, 500.0])
+    node.poll_status()
+
+    assert node._error_code == ERR_FW_SERVO_FEEDBACK
+    assert 'invalid_servo_ids=2' in node._error_message
 
 
 def test_completion_requires_matching_wire_id(node):
