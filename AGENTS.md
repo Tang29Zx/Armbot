@@ -25,7 +25,7 @@
 ## 2. 沟通与文档
 
 - 对话、解释、计划、review 和总结使用中文。
-- 代码、注释、标识符、文件名、命令、环境变量、commit message 和 PR 内容默认使用英文。
+- 代码、注释、标识符、文件名、命令、环境变量和 PR 内容默认使用英文。
 - README、技术文档、产品文案、验证记录、PRD 和 Tech Spec 默认使用中文。
 - 结论先行，再解释原因、用户影响和关键取舍。
 - 基于事实沟通；发现需求、方案或假设有问题时直接指出。
@@ -131,7 +131,7 @@ Specify -> Plan -> Task -> Execute -> Verify
 
 - 未经明确要求，不自动 commit、push、merge、rebase 或创建 PR。
 - 提交前检查 `git status`、暂存区和 diff。
-- commit message 使用英文，描述用户可见变化或修复根因。
+- commit message 可使用中文或英文；同一组提交尽量保持语言一致，并描述用户可见变化或修复根因。
 - 不把生成物、日志、缓存、凭据或本地运行状态提交到仓库。
 - 不使用 `git reset --hard`、`git clean`、force push 或破坏性 rebase，除非用户明确授权且已说明影响。
 - 历史重写和 force push 优先使用备份分支及 `--force-with-lease`。
