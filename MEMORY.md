@@ -3,7 +3,7 @@
 ## 项目概况
 
 - 项目名：Armbot
-- 最近更新：2026-07-13
+- 最近更新：2026-07-14
 - 技术栈：ROS 2 Humble、Python 3.10、I2C
 - 构建与依赖：colcon、ament、APT、pip
 - 主要目录：`ros2_ws/src`、`rdk_video_push`、`docs`、`.github/workflows`
@@ -17,9 +17,6 @@
   `(15, 0, 2) cm`，复位舵机值反解的末端 pitch 约为 `-54.48 deg`。
 - 夹爪规范值固定为 `0=open`、`1=closed`；STM32 理论范围为
   `raw 200=open`、`raw 700=closed`，开机复位值 `raw 226` 接近全开。
-- `P` 单舵机命令的 byte 12..15 传递 little-endian `duration_ms`；Xbox 遥控
-  默认使用 `120 ms`，旧调用者传 `0` 时固件回退为 `1000 ms`。采集仍使用
-  servo 1 反馈反算的实际夹爪位置。
 
 ## Xbox 手柄映射
 
@@ -40,6 +37,10 @@
 
 ## 已验证记录
 
+- 2026-07-14：RDK 实机证明旧版显式回零恢复存在安全缺口：固件持续返回旧
+  `ARM_DONE` 且舵机 2～6 反馈为 `0`、`position_valid=false` 时，控制器仍会按
+  命令时长将 Home 标记成功并允许 A 启用遥控。该行为不能作为回零验收依据，
+  后续实现必须同时验证匹配命令完成与有效位置反馈。
 - 2026-07-13：`action_interfaces`、`action_pkg` 可完成隔离构建；Xbox 遥控与
   控制器相关 `colcon test` 共 48 项，0 failures、0 errors、1 个仓库原有
   copyright skip。
