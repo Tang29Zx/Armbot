@@ -22,12 +22,23 @@ from action_pkg.arm_controller_node import (
     ERR_DURATION_RANGE,
     ERR_ESTOP_LATCHED,
     ERR_FW_NO_SOLVE,
+    ERR_FW_MOTION_TIMEOUT,
+    ERR_FW_PROTOCOL,
+    ERR_FW_RESTARTED,
     ERR_GRIPPER_RANGE,
     ERR_I2C_LOST,
     ERR_JOINT_DISABLED,
     ERR_NONFINITE_FIELD,
     ERR_STALE_CMD,
+    FW_ERROR_NO_IK_SOLUTION,
+    FW_ERROR_MOTION_TIMEOUT,
+    FW_LIFECYCLE_ACCEPTED,
+    FW_LIFECYCLE_COMPLETED,
+    FW_LIFECYCLE_FAILED,
+    FW_LIFECYCLE_READY,
     I2C_FAIL_THRESHOLD,
+    I2C_PROTOCOL_MAGIC,
+    I2C_PROTOCOL_VERSION,
 )
 import pytest
 import rclpy
@@ -46,6 +57,7 @@ def node(tmp_path, monkeypatch):
     n._i2c_write = lambda data: True
     n._i2c_read_status = lambda: None
     n.i2c_ok = True
+    n._firmware_protocol_ok = True
     yield n
     n.destroy_node()
     rclpy.shutdown()
@@ -58,6 +70,18 @@ def _cmd(mode, seq=0, **kw):
     for k, v in kw.items():
         setattr(c, k, v)
     return c
+
+
+def _status(lifecycle, wire_id=0, error=0, positions=None):
+    packet = bytearray(32)
+    packet[0] = I2C_PROTOCOL_MAGIC
+    packet[1] = I2C_PROTOCOL_VERSION
+    packet[2] = lifecycle
+    packet[3] = error
+    struct.pack_into('<I', packet, 4, wire_id)
+    for index, value in enumerate(positions or [0.0] * 6):
+        struct.pack_into('<f', packet, 8 + index * 4, value)
+    return list(packet)
 
 
 # ===================== sec 5.3 validation =====================
@@ -89,6 +113,31 @@ def test_valid_end_effector_moves(node):
     assert node._last_applied_seq == 1
 
 
+def test_motion_rejected_until_v2_status_is_verified(node):
+    node._firmware_protocol_ok = False
+    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=1,
+                             x=0.0, y=0.0, z=0.0, pitch=0.0,
+                             duration_sec=1.0))
+    assert node._state == ArmState.STATE_ERROR
+    assert node._error_code == ERR_FW_PROTOCOL
+
+
+def test_end_effector_uses_v2_packet_layout(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    node.handle_command(_cmd(
+        ArmCommand.MODE_END_EFFECTOR, seq=7,
+        x=15.0, y=1.0, z=2.0, pitch=-20.0, duration_sec=0.09))
+
+    packet = writes[-1]
+    assert packet[0] == ord('A')
+    assert packet[1] == I2C_PROTOCOL_VERSION
+    assert struct.unpack_from('<I', packet, 2)[0] == node._active_wire_id
+    assert struct.unpack_from('<H', packet, 6)[0] == 90
+    assert struct.unpack_from('<6f', packet, 8) == pytest.approx(
+        [15.0, 1.0, 2.0, -20.0, -90.0, 90.0])
+
+
 def test_end_effector_units_are_centimeters(node):
     assert node._cfg('end_effector_units') == 'cm'
 
@@ -114,8 +163,11 @@ def test_gripper_open_close_contract(node, position, expected_raw):
         gripper_position=position,
         duration_sec=0.12,
     ))
-    assert struct.unpack_from('<f', writes[-1], 8)[0] == expected_raw
-    assert struct.unpack_from('<I', writes[-1], 12)[0] == 120
+    assert writes[-1][0] == ord('P')
+    assert writes[-1][1] == I2C_PROTOCOL_VERSION
+    assert writes[-1][8] == 1
+    assert struct.unpack_from('<f', writes[-1], 12)[0] == expected_raw
+    assert struct.unpack_from('<H', writes[-1], 6)[0] == 120
 
 
 def test_gripper_duration_defaults_to_one_second_for_legacy_callers(node):
@@ -126,7 +178,7 @@ def test_gripper_duration_defaults_to_one_second_for_legacy_callers(node):
         seq=1,
         gripper_position=0.5,
     ))
-    assert struct.unpack_from('<I', writes[-1], 12)[0] == 1000
+    assert struct.unpack_from('<H', writes[-1], 6)[0] == 1000
 
 
 def test_real_gripper_and_home_joint_feedback(node):
@@ -149,6 +201,16 @@ def test_real_gripper_and_home_joint_feedback(node):
     struct.pack_into('<f', packet, 8, 450.0)
     node._update_joint_feedback(packet)
     assert node._gripper_position == pytest.approx(0.5)
+
+
+def test_missing_arm_servo_feedback_is_invalid(node):
+    packet = bytearray(32)
+    struct.pack_into('<f', packet, 8, 497.0)
+
+    node._update_joint_feedback(packet)
+
+    assert node._gripper_position == pytest.approx(0.594)
+    assert node._position_valid is False
 
 
 # ===================== sec 3.2 / 5.4 emergency stop =====================
@@ -238,41 +300,121 @@ def test_legacy_seq_zero_bypasses_stale_check(node):
 
 
 # ===================== firmware status mapping (sec 3.3) =====================
-def test_firmware_arm_ok_maps_to_moving(node):
-    node._i2c_read_status = lambda: list(b'ARM_OK__') + [0] * 24
+def test_matching_ack_clears_command_watchdog(node):
+    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=1,
+                             x=0.0, y=0.0, z=0.0, pitch=0.0,
+                             duration_sec=1.0))
+    wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_ACCEPTED, wire_id)
     node.poll_status()
+
+    assert node._state == ArmState.STATE_MOVING
+    assert node._pending_motion is False
+
+
+def test_nonmatching_status_does_not_clear_command_watchdog(node):
+    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=1,
+                             x=0.0, y=0.0, z=0.0, pitch=0.0,
+                             duration_sec=1.0))
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_ACCEPTED, node._active_wire_id + 1)
+    node.poll_status()
+
+    assert node._pending_motion is True
     assert node._state == ArmState.STATE_MOVING
 
 
-def test_firmware_no_solve_maps_to_error(node):
-    node._i2c_read_status = lambda: list(b'NO_SOLVE') + [0] * 24
+def test_matching_firmware_failure_maps_to_current_command(node):
+    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=3,
+                             x=0.0, y=0.0, z=0.0, pitch=0.0,
+                             duration_sec=1.0))
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_FAILED, node._active_wire_id,
+        FW_ERROR_NO_IK_SOLUTION)
     node.poll_status()
+
     assert node._state == ArmState.STATE_ERROR
     assert node._error_code == ERR_FW_NO_SOLVE
+    assert node._last_sequence_id == 3
 
 
-def test_arm_done_only_from_moving(node):
-    # At startup (IDLE) a stale ARM_DONE must NOT fabricate success.
-    node._state = ArmState.STATE_IDLE
-    node._i2c_read_status = lambda: list(b'ARM_DONE') + [0] * 24
+def test_matching_motion_timeout_is_never_success(node):
+    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=4,
+                             x=0.0, y=0.0, z=0.0, pitch=0.0,
+                             duration_sec=1.0))
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_FAILED, node._active_wire_id,
+        FW_ERROR_MOTION_TIMEOUT)
     node.poll_status()
-    assert node._state == ArmState.STATE_IDLE
 
-    # While MOVING, ARM_DONE -> SUCCEEDED.
-    node._state = ArmState.STATE_MOVING
-    node._last_firmware_status = ''  # force a transition
-    node._i2c_read_status = lambda: list(b'ARM_DONE') + [0] * 24
+    assert node._state == ArmState.STATE_ERROR
+    assert node._error_code == ERR_FW_MOTION_TIMEOUT
+    assert node._last_sequence_id == 4
+
+
+def test_completion_requires_matching_wire_id(node):
+    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=1,
+                             x=0.0, y=0.0, z=0.0, pitch=0.0,
+                             duration_sec=1.0))
+    wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_COMPLETED, wire_id + 1)
+    node.poll_status()
+    assert node._state == ArmState.STATE_MOVING
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_COMPLETED, wire_id)
     node.poll_status()
     assert node._state == ArmState.STATE_SUCCEEDED
 
 
-def test_firmware_status_clears_pending_motion(node):
+def test_old_text_status_fails_protocol_instead_of_acknowledging(node):
+    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=1,
+                             x=0.0, y=0.0, z=0.0, pitch=0.0,
+                             duration_sec=1.0))
+    node._i2c_read_status = lambda: list(b'ARM_DONE') + [0] * 24
+    node.poll_status()
+
+    assert node._state == ArmState.STATE_ERROR
+    assert node._error_code == ERR_FW_PROTOCOL
+    assert node._firmware_protocol_ok is False
+
+
+def test_firmware_restart_is_latched(node):
     node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=1,
                              x=0.0, y=0.0, z=0.0, pitch=0.0, duration_sec=1.0))
-    assert node._pending_motion
-    node._i2c_read_status = lambda: list(b'ARM_OK__') + [0] * 24
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_ACCEPTED, node._active_wire_id)
     node.poll_status()
-    assert node._pending_motion is False
+    node._i2c_read_status = lambda: _status(FW_LIFECYCLE_READY)
+    node.poll_status()
+
+    assert node._state == ArmState.STATE_ERROR
+    assert node._error_code == ERR_FW_RESTARTED
+    assert node._firmware_restart_latched is True
+
+
+def test_waiting_for_ack_keeps_only_latest_command(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    base = {'x': 0.0, 'y': 0.0, 'z': 0.0, 'pitch': 0.0,
+            'duration_sec': 1.0}
+    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=1, **base))
+    first_wire_id = node._active_wire_id
+    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=2, **base))
+    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=3, **base))
+
+    assert len(writes) == 1
+    assert node._queued_command.sequence_id == 3
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_ACCEPTED, first_wire_id)
+    node.poll_status()
+
+    assert len(writes) == 2
+    assert node._active_seq == 3
+    assert node._pending_motion is True
 
 
 # ===================== sec 5.5 I2C failure threshold =====================
@@ -280,9 +422,20 @@ def test_i2c_failure_threshold_latches_error(node):
     bus = __import__('unittest.mock', fromlist=['MagicMock']).MagicMock()
     bus.i2c_rdwr.side_effect = OSError('simulated bus error')
     node.bus = bus
-    for _ in range(I2C_FAIL_THRESHOLD + 1):
+    for _ in range(I2C_FAIL_THRESHOLD - 1):
         ArmControllerNode._i2c_write(node, b'\x00' * 32)
+    assert node._error_code != ERR_I2C_LOST
+
+    ArmControllerNode._i2c_write(node, b'\x00' * 32)
     assert node._error_code == ERR_I2C_LOST
+
+
+def test_corrupt_v2_lifecycle_is_a_protocol_error(node):
+    node._i2c_read_status = lambda: _status(0xFF)
+    node.poll_status()
+
+    assert node._firmware_protocol_ok is False
+    assert node._error_code == ERR_FW_PROTOCOL
 
 
 # ===================== sec 5.3 command timeout =====================
