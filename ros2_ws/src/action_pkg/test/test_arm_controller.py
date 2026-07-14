@@ -183,6 +183,20 @@ def test_gripper_duration_defaults_to_one_second_for_legacy_callers(node):
     assert struct.unpack_from('<H', writes[-1], 6)[0] == 1000
 
 
+def test_gripper_command_does_not_replace_feedback(node):
+    node._gripper_position = 0.25
+    node._i2c_write = lambda data: True
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER,
+        seq=1,
+        gripper_position=0.8,
+        duration_sec=0.12,
+    ))
+
+    assert node._gripper_position == pytest.approx(0.25)
+
+
 def test_real_gripper_and_home_joint_feedback(node):
     packet = bytearray(32)
     reset_raw = [200.0, 500.0, 177.0, 129.0, 408.0, 500.0]

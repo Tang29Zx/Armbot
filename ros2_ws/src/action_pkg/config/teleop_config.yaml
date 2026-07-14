@@ -10,6 +10,10 @@ arm_teleop_node:
     translation_speed_cm_sec: 1.0
     pitch_speed_deg_sec: 10.0
     gripper_speed_sec: 0.5
+    gripper_contact_min_progress: 0.02
+    gripper_contact_min_gap: 0.04
+    gripper_contact_stable_delta: 0.006
+    gripper_contact_stable_samples: 3
     command_duration_sec: 0.09
     home_gripper_duration_sec: 1.0
     home_duration_sec: 2.0

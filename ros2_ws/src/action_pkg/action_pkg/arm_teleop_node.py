@@ -11,6 +11,7 @@ from action_pkg.teleop_mapping import (
     integrate_target,
     joints_near_home,
     MODE_ARM,
+    MODE_GRIPPER,
     rising_edge,
     Target,
     trigger_pressed,
@@ -101,6 +102,12 @@ class ArmTeleopNode(Node):
         self._home_pending_seq = None
         self._home_completion_seen = False
         self._reset_future = None
+        self._gripper_close_origin = None
+        self._gripper_last_feedback = None
+        self._gripper_close_progress = False
+        self._gripper_contact_samples = 0
+        self._gripper_contact_latched = False
+        self._gripper_hold_pending_seq = None
         self._shadow_estop_latched = False
         self._chord_started = {'reset': None, 'home': None}
         self._chord_triggered = {'reset': False, 'home': False}
@@ -134,6 +141,10 @@ class ArmTeleopNode(Node):
             'translation_speed_cm_sec': 1.0,
             'pitch_speed_deg_sec': 10.0,
             'gripper_speed_sec': 0.5,
+            'gripper_contact_min_progress': 0.02,
+            'gripper_contact_min_gap': 0.04,
+            'gripper_contact_stable_delta': 0.006,
+            'gripper_contact_stable_samples': 3,
             'command_duration_sec': 0.09,
             'home_gripper_duration_sec': 1.0,
             'home_duration_sec': 2.0,
@@ -200,26 +211,57 @@ class ArmTeleopNode(Node):
         if self._next_sequence == 0:
             self._next_sequence = 1
 
+        close_amount = trigger_pressed(float(self._axes[4]))
+        open_amount = trigger_pressed(float(self._axes[5]))
+        trigger_deadzone = float(self._cfg('trigger_deadzone'))
         triggers_released = (
-            trigger_pressed(float(self._axes[4]))
-            <= float(self._cfg('trigger_deadzone'))
-            and trigger_pressed(float(self._axes[5]))
-            <= float(self._cfg('trigger_deadzone'))
+            close_amount <= trigger_deadzone
+            and open_amount <= trigger_deadzone
         )
-        if (math.isfinite(msg.gripper_position)
+        close_requested = close_amount - open_amount > trigger_deadzone
+        actual_gripper = None
+        if math.isfinite(msg.gripper_position):
+            actual_gripper = max(0.0, min(1.0, msg.gripper_position))
+        healthy_gripper_feedback = (
+            msg.position_valid
+            and msg.state not in (ArmState.STATE_ERROR, ArmState.STATE_ESTOP)
+            and actual_gripper is not None
+        )
+        close_released = (
+            self._enabled
+            and triggers_released
+            and self._gripper_close_origin is not None
+            and not self._gripper_contact_latched
+            and healthy_gripper_feedback
+        )
+        if close_released:
+            self._hold_gripper_feedback(actual_gripper, contact=False)
+        elif (actual_gripper is not None
                 and (not self._enabled or triggers_released)):
             self._target = replace(
                 self._target,
-                gripper=max(0.0, min(1.0, msg.gripper_position)),
+                gripper=actual_gripper,
             )
+        if (self._enabled and close_requested
+                and healthy_gripper_feedback):
+            self._observe_gripper_contact(actual_gripper)
+        else:
+            self._reset_gripper_contact_tracking(
+                clear_latch=not self._enabled or not close_requested)
 
         if msg.state in (ArmState.STATE_ERROR, ArmState.STATE_ESTOP):
             self._startup_sync_allowed = False
+            self._gripper_hold_pending_seq = None
             self._home_open_pending_seq = None
             self._home_pending_seq = None
             self._home_completion_seen = False
             self._lose_sync('arm state is ERROR/ESTOP')
             return
+
+        if (self._gripper_hold_pending_seq is not None
+                and msg.sequence_id == self._gripper_hold_pending_seq
+                and msg.state == ArmState.STATE_SUCCEEDED):
+            self._gripper_hold_pending_seq = None
 
         if self._home_open_pending_seq is not None:
             if msg.sequence_id != self._home_open_pending_seq:
@@ -297,6 +339,14 @@ class ArmTeleopNode(Node):
         )
         if mode is None or updated == self._target:
             return
+        if mode == MODE_ARM and self._gripper_hold_pending_seq is not None:
+            return
+        if (mode == MODE_GRIPPER and self._gripper_contact_latched
+                and updated.gripper > self._target.gripper):
+            return
+        if mode == MODE_GRIPPER and updated.gripper < self._target.gripper:
+            self._gripper_hold_pending_seq = None
+            self._reset_gripper_contact_tracking(clear_latch=True)
         self._target = updated
         ros_mode = (ArmCommand.MODE_END_EFFECTOR
                     if mode == MODE_ARM else ArmCommand.MODE_GRIPPER)
@@ -322,6 +372,53 @@ class ArmTeleopNode(Node):
             self._state_timed_out = True
             self._startup_sync_allowed = False
             self._lose_sync('ArmState timeout')
+
+    def _observe_gripper_contact(self, actual):
+        if self._gripper_contact_latched:
+            return
+        if self._gripper_close_origin is None:
+            self._gripper_close_origin = actual
+            self._gripper_last_feedback = actual
+            return
+
+        if (actual - self._gripper_close_origin
+                >= float(self._cfg('gripper_contact_min_progress'))):
+            self._gripper_close_progress = True
+        stable = abs(actual - self._gripper_last_feedback) <= float(
+            self._cfg('gripper_contact_stable_delta'))
+        target_gap = self._target.gripper - actual
+        if (self._gripper_close_progress and stable
+                and target_gap >= float(
+                    self._cfg('gripper_contact_min_gap'))):
+            self._gripper_contact_samples += 1
+        else:
+            self._gripper_contact_samples = 0
+        self._gripper_last_feedback = actual
+
+        if self._gripper_contact_samples < int(
+                self._cfg('gripper_contact_stable_samples')):
+            return
+        self._hold_gripper_feedback(actual, contact=True)
+
+    def _hold_gripper_feedback(self, actual, contact):
+        self._gripper_contact_latched = contact
+        self._target = replace(self._target, gripper=actual)
+        self._gripper_hold_pending_seq = self._publish_command(
+            ArmCommand.MODE_GRIPPER,
+            self._target,
+            float(self._cfg('command_duration_sec')))
+        self.get_logger().info(
+            '%s; holding at feedback %.3f'
+            % ('gripper contact detected' if contact
+               else 'gripper close released', actual))
+
+    def _reset_gripper_contact_tracking(self, clear_latch=False):
+        self._gripper_close_origin = None
+        self._gripper_last_feedback = None
+        self._gripper_close_progress = False
+        self._gripper_contact_samples = 0
+        if clear_latch:
+            self._gripper_contact_latched = False
 
     def _update_chords(self, now):
         if not self._joy_valid:
@@ -496,6 +593,8 @@ class ArmTeleopNode(Node):
         was_synced = self._synced
         self._synced = False
         self._home_samples = 0
+        self._gripper_hold_pending_seq = None
+        self._reset_gripper_contact_tracking(clear_latch=True)
         self._set_enabled(False, reason)
         if was_synced:
             self.get_logger().warn('%s; home is required' % reason)

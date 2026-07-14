@@ -163,6 +163,103 @@ def test_enabled_teleop_tracks_gripper_feedback_when_triggers_are_released(
     rclpy.shutdown()
 
 
+def test_gripper_contact_holds_feedback_and_stops_closing(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    rclpy.init()
+    node = ArmTeleopNode()
+    node._command_pub = MagicMock()
+    node._enabled = True
+    node._joy_valid = True
+    node._axes[4] = -1.0
+    node._target = replace(node._target, gripper=0.8)
+
+    state = ArmState()
+    state.state = ArmState.STATE_MOVING
+    state.position_valid = True
+    for actual in (0.20, 0.30, 0.31, 0.311, 0.310, 0.311):
+        state.gripper_position = actual
+        node._state_callback(state)
+
+    hold = node._command_pub.publish.call_args.args[0]
+    assert hold.mode == ArmCommand.MODE_GRIPPER
+    assert hold.gripper_position == pytest.approx(0.311)
+    assert node._target.gripper == pytest.approx(0.311)
+    assert node._gripper_contact_latched
+
+    node._command_pub.reset_mock()
+    node._axes[1] = 1.0
+    node._last_tick = time.monotonic() - 0.1
+    node._control_tick()
+    node._command_pub.publish.assert_not_called()
+
+    state.state = ArmState.STATE_SUCCEEDED
+    state.sequence_id = hold.sequence_id
+    node._state_callback(state)
+    node._last_tick = time.monotonic() - 0.1
+    node._control_tick()
+    moved = node._command_pub.publish.call_args.args[0]
+    assert moved.mode == ArmCommand.MODE_END_EFFECTOR
+
+    node._axes[1] = 0.0
+    node._axes[4] = 1.0
+    node._state_callback(state)
+    assert not node._gripper_contact_latched
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+def test_stationary_gripper_without_progress_is_not_contact(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    rclpy.init()
+    node = ArmTeleopNode()
+    node._command_pub = MagicMock()
+    node._enabled = True
+    node._axes[4] = -1.0
+    node._target = replace(node._target, gripper=0.8)
+
+    state = ArmState()
+    state.state = ArmState.STATE_MOVING
+    state.position_valid = True
+    state.gripper_position = 0.3
+    for _ in range(6):
+        node._state_callback(state)
+
+    node._command_pub.publish.assert_not_called()
+    assert not node._gripper_contact_latched
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+def test_releasing_close_trigger_holds_current_feedback(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    rclpy.init()
+    node = ArmTeleopNode()
+    node._command_pub = MagicMock()
+    node._enabled = True
+    node._axes[4] = -1.0
+    node._target = replace(node._target, gripper=0.7)
+
+    state = ArmState()
+    state.state = ArmState.STATE_MOVING
+    state.position_valid = True
+    state.gripper_position = 0.3
+    node._state_callback(state)
+
+    node._axes[4] = 1.0
+    state.gripper_position = 0.32
+    node._state_callback(state)
+
+    hold = node._command_pub.publish.call_args.args[0]
+    assert hold.mode == ArmCommand.MODE_GRIPPER
+    assert hold.gripper_position == pytest.approx(0.32)
+    assert node._target.gripper == pytest.approx(0.32)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
 def test_explicit_home_requires_three_valid_feedback_samples(
         tmp_path, monkeypatch):
     monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))

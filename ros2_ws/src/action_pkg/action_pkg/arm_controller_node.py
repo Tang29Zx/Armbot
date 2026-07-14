@@ -537,10 +537,7 @@ class ArmControllerNode(Node):
             buf, TAG_SERVO, wire_id, self._duration_ms(duration))
         buf[8] = sid & 0xFF
         struct.pack_into('<f', buf, 12, raw)
-        ok = self._i2c_write(buf)
-        if ok:
-            self._gripper_position = cmd.gripper_position
-        return ok
+        return self._i2c_write(buf)
 
     def _servo_id_for(self, joint_name):
         for entry in self._cfg('servo_id_map'):
