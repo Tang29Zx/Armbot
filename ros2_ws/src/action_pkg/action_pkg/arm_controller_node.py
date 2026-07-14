@@ -175,6 +175,7 @@ class ArmControllerNode(Node):
         self._pending_sent_ns = 0
         self._active_wire_id = 0
         self._active_seq = 0
+        self._active_mode = None
         self._wire_id_counter = 0
         self._queued_command = None
         self._last_fw_contact_ns = 0      # any successfully read status packet
@@ -307,9 +308,7 @@ class ArmControllerNode(Node):
         # can time out while reads still work, while repeated read/write errors
         # stop all motion through this separate threshold.
         self._position_valid = False
-        self._pending_motion = False
-        self._queued_command = None
-        self._active_wire_id = 0
+        self._clear_active_motion()
         self._set_error(ERR_I2C_LOST, message)
 
     # ===================== command entry points =====================
@@ -370,7 +369,9 @@ class ArmControllerNode(Node):
         seq = int(cmd.sequence_id)
         if seq > 0:
             self._last_applied_seq = seq
-        if self._pending_motion:
+        if (self._pending_motion
+                or (self._active_wire_id != 0
+                    and self._active_mode != cmd.mode)):
             self._queued_command = copy.deepcopy(cmd)
             self._set_state(ArmState.STATE_MOVING, seq)
             return
@@ -387,6 +388,7 @@ class ArmControllerNode(Node):
         seq = int(cmd.sequence_id)
         self._active_wire_id = wire_id
         self._active_seq = seq
+        self._active_mode = cmd.mode
         self._set_state(ArmState.STATE_MOVING, seq)
         self._arm_pending_motion(seq, wire_id)
         return True
@@ -394,9 +396,19 @@ class ArmControllerNode(Node):
     def _flush_queued_command(self):
         if self._queued_command is None or self._pending_motion:
             return
+        if (self._active_wire_id != 0
+                and self._active_mode != self._queued_command.mode):
+            return
         cmd = self._queued_command
         self._queued_command = None
         self._dispatch_motion(cmd)
+
+    def _clear_active_motion(self, clear_queue=True):
+        self._pending_motion = False
+        self._active_wire_id = 0
+        self._active_mode = None
+        if clear_queue:
+            self._queued_command = None
 
     def _take_wire_id(self):
         self._wire_id_counter = (self._wire_id_counter + 1) & 0xFFFFFFFF
@@ -443,6 +455,7 @@ class ArmControllerNode(Node):
         buf = bytearray(CMD_PACKET_SIZE)
         self._pack_command_header(buf, TAG_STOP, wire_id, 0)
         self._i2c_write(buf)
+        self._clear_active_motion()
         # A STOP command must never make a latched emergency stop look cleared.
         state = ArmState.STATE_ESTOP if self._estop_latched else ArmState.STATE_IDLE
         self._set_state(state, seq)
@@ -548,8 +561,7 @@ class ArmControllerNode(Node):
         now_ns = self.get_clock().now().nanoseconds
         timeout_ns = int(self._cfg('command_timeout_sec') * 1e9)
         if now_ns - self._pending_sent_ns > timeout_ns:
-            self._pending_motion = False
-            self._queued_command = None
+            self._clear_active_motion()
             self._set_error(
                 ERR_CMD_TIMEOUT,
                 'no matching firmware ack within %.2fs '
@@ -662,9 +674,7 @@ class ArmControllerNode(Node):
         if decoded is None:
             self._firmware_protocol_ok = False
             self._position_valid = False
-            self._pending_motion = False
-            self._queued_command = None
-            self._active_wire_id = 0
+            self._clear_active_motion()
             raw_header = bytes(data[:8]).hex()
             if self._error_code != ERR_FW_PROTOCOL:
                 self._set_error(
@@ -693,9 +703,7 @@ class ArmControllerNode(Node):
             if restarted:
                 self._firmware_restart_latched = True
                 self._firmware_seen_nonzero_id = False
-                self._pending_motion = False
-                self._queued_command = None
-                self._active_wire_id = 0
+                self._clear_active_motion()
                 self._set_error(
                     ERR_FW_RESTARTED,
                     'firmware restarted; reset error and run home again')
@@ -725,17 +733,14 @@ class ArmControllerNode(Node):
 
         if lifecycle == FW_LIFECYCLE_COMPLETED:
             completed_seq = self._active_seq
-            self._pending_motion = False
-            self._active_wire_id = 0
+            self._clear_active_motion(clear_queue=False)
             self._set_state(ArmState.STATE_SUCCEEDED, completed_seq)
             self._flush_queued_command()
             return
 
         if lifecycle == FW_LIFECYCLE_FAILED:
             failed_seq = self._active_seq
-            self._pending_motion = False
-            self._queued_command = None
-            self._active_wire_id = 0
+            self._clear_active_motion()
             self._last_sequence_id = failed_seq
             code, message = _firmware_error_details(error)
             self._set_error(code, '%s (wire_id=%d)' % (message, wire_id))
@@ -779,9 +784,7 @@ class ArmControllerNode(Node):
         self._estop_request = False
         self._error_code = 0
         self._error_message = ''
-        self._pending_motion = False
-        self._queued_command = None
-        self._active_wire_id = 0
+        self._clear_active_motion()
         self._firmware_restart_latched = False
         self._set_state(ArmState.STATE_IDLE)
         response.success = True

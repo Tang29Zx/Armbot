@@ -37,6 +37,17 @@
 
 ## 已验证记录
 
+- 2026-07-14：独立只读固件对舵机 1～6 连续读取完整 9 字节，均为
+  `00 55 55 ID 05 1C posL posH checksum`，解析结果
+  `rx=OK/uart=0x00/skip=1/checksum valid`。舵机断电时每次请求仍收到单独的
+  `0x00`，证明它来自板端半双工收发切换路径，而不是舵机回包。生产解析器遇到
+  帧头前非 `0x55` 字节就立即失败，是当前全部反馈无效的直接软件根因；修复应在
+  有界窗口内搜索帧头并校验完整帧。
+- 2026-07-14 17:25：RDK 部署 v2 后，Home `wire_id=1` 从 `EXECUTING` 进入
+  `FAILED/SERVO_FEEDBACK_FAILED`；ROS 映射为 `error_code=0x0024`，保持
+  `position_valid=false` 和 `/arm/teleop_enabled=false`，没有把无反馈 Home
+  误报为成功。状态包中的舵机 1～6 raw 当时全部为 `0`，具体失败舵机及反馈接收
+  根因仍待确认。
 - 2026-07-14：RDK 实机证明旧版显式回零恢复存在安全缺口：固件持续返回旧
   `ARM_DONE` 且舵机 2～6 反馈为 `0`、`position_valid=false` 时，控制器仍会按
   命令时长将 Home 标记成功并允许 A 启用遥控。该行为不能作为回零验收依据，

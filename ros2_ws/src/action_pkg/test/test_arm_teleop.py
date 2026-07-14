@@ -1,5 +1,6 @@
 """State-machine tests for Xbox teleoperation without hardware."""
 
+from dataclasses import replace
 import math
 import time
 from unittest.mock import MagicMock
@@ -128,6 +129,30 @@ def test_real_startup_syncs_after_three_home_samples(tmp_path, monkeypatch):
         node._state_callback(state)
     assert node._synced
     assert node._target.gripper == pytest.approx(0.1)
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+def test_enabled_teleop_tracks_gripper_feedback_when_triggers_are_released(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    rclpy.init()
+    node = ArmTeleopNode()
+    node._enabled = True
+    node._target = replace(node._target, gripper=1.0)
+
+    state = ArmState()
+    state.state = ArmState.STATE_MOVING
+    state.gripper_position = 0.05
+    node._state_callback(state)
+
+    assert node._target.gripper == pytest.approx(0.05)
+
+    node._target = replace(node._target, gripper=1.0)
+    node._axes[4] = -1.0
+    state.gripper_position = 0.2
+    node._state_callback(state)
+    assert node._target.gripper == pytest.approx(1.0)
     node.destroy_node()
     rclpy.shutdown()
 

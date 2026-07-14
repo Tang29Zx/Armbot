@@ -13,6 +13,7 @@ from action_pkg.teleop_mapping import (
     MODE_ARM,
     rising_edge,
     Target,
+    trigger_pressed,
     valid_joy,
 )
 import rclpy
@@ -196,7 +197,14 @@ class ArmTeleopNode(Node):
         if self._next_sequence == 0:
             self._next_sequence = 1
 
-        if math.isfinite(msg.gripper_position) and not self._enabled:
+        triggers_released = (
+            trigger_pressed(float(self._axes[4]))
+            <= float(self._cfg('trigger_deadzone'))
+            and trigger_pressed(float(self._axes[5]))
+            <= float(self._cfg('trigger_deadzone'))
+        )
+        if (math.isfinite(msg.gripper_position)
+                and (not self._enabled or triggers_released)):
             self._target = replace(
                 self._target,
                 gripper=max(0.0, min(1.0, msg.gripper_position)),

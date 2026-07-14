@@ -417,6 +417,32 @@ def test_waiting_for_ack_keeps_only_latest_command(node):
     assert node._pending_motion is True
 
 
+def test_different_motion_modes_wait_for_completion(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER, seq=1,
+        gripper_position=1.0, duration_sec=0.09))
+    gripper_wire_id = node._active_wire_id
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_ACCEPTED, gripper_wire_id)
+    node.poll_status()
+    node.handle_command(_cmd(
+        ArmCommand.MODE_END_EFFECTOR, seq=2,
+        x=15.0, y=0.1, z=2.0, pitch=-54.48, duration_sec=0.09))
+
+    assert [packet[0] for packet in writes] == [ord('P')]
+    assert node._queued_command.sequence_id == 2
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_COMPLETED, gripper_wire_id)
+    node.poll_status()
+
+    assert [packet[0] for packet in writes] == [ord('P'), ord('A')]
+    assert node._active_seq == 2
+
+
 # ===================== sec 5.5 I2C failure threshold =====================
 def test_i2c_failure_threshold_latches_error(node):
     bus = __import__('unittest.mock', fromlist=['MagicMock']).MagicMock()
