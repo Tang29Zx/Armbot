@@ -10,7 +10,7 @@ arm_teleop_node:
     translation_speed_cm_sec: 1.0
     pitch_speed_deg_sec: 10.0
     gripper_speed_sec: 0.5
-    command_duration_sec: 0.12
+    command_duration_sec: 0.09
     home_duration_sec: 2.0
 
     home_target: [15.0, 0.0, 2.0, -54.48]

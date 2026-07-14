@@ -130,3 +130,77 @@ def test_real_startup_syncs_after_three_home_samples(tmp_path, monkeypatch):
     assert node._target.gripper == pytest.approx(0.1)
     node.destroy_node()
     rclpy.shutdown()
+
+
+def test_explicit_home_requires_three_valid_feedback_samples(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    rclpy.init()
+    node = ArmTeleopNode()
+    node._command_pub = MagicMock()
+
+    state = ArmState()
+    state.state = ArmState.STATE_IDLE
+    state.position_valid = False
+    node._state_callback(state)
+    node._request_home()
+
+    published = node._command_pub.publish.call_args.args[0]
+    state.state = ArmState.STATE_SUCCEEDED
+    state.sequence_id = published.sequence_id
+    node._state_callback(state)
+
+    node._joy_valid = True
+    node._last_joy_time = time.monotonic()
+    assert node._synced is False
+    assert node._enable_block_reason(time.monotonic()) != ''
+
+    state.position_valid = True
+    state.joint_position = [
+        0.0,
+        math.radians(112.08),
+        math.radians(-89.04),
+        math.radians(-77.52),
+        0.0,
+    ]
+    for _ in range(2):
+        node._state_callback(state)
+        assert node._synced is False
+    node._state_callback(state)
+
+    assert node._synced is True
+    assert node._enable_block_reason(time.monotonic()) == ''
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+def test_home_feedback_outside_tolerance_does_not_sync(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    rclpy.init()
+    node = ArmTeleopNode()
+    node._command_pub = MagicMock()
+    state = ArmState()
+    state.state = ArmState.STATE_IDLE
+    node._state_callback(state)
+    node._request_home()
+    state.state = ArmState.STATE_SUCCEEDED
+    state.sequence_id = node._home_pending_seq
+    state.position_valid = True
+    state.joint_position = [1.0] * 5
+    for _ in range(5):
+        node._state_callback(state)
+    assert node._synced is False
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+def test_overlapping_stream_duration_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    rclpy.init()
+    with pytest.raises(ValueError, match='90% of the control period'):
+        ArmTeleopNode(parameter_overrides=[
+            Parameter('control_rate_hz', value=10.0),
+            Parameter('command_duration_sec', value=0.12),
+        ])
+    rclpy.shutdown()

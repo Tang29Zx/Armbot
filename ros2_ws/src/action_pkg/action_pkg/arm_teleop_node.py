@@ -97,6 +97,7 @@ class ArmTeleopNode(Node):
         self._home_samples = 0
         self._next_sequence = 1
         self._home_pending_seq = None
+        self._home_completion_seen = False
         self._reset_future = None
         self._shadow_estop_latched = False
         self._chord_started = {'reset': None, 'home': None}
@@ -105,6 +106,14 @@ class ArmTeleopNode(Node):
         rate = float(self._cfg('control_rate_hz'))
         if rate <= 0.0:
             raise ValueError('control_rate_hz must be positive')
+        command_duration = float(self._cfg('command_duration_sec'))
+        if command_duration <= 0.0:
+            raise ValueError('command_duration_sec must be positive')
+        max_stream_duration = 0.9 / rate
+        if command_duration > max_stream_duration + 1e-9:
+            raise ValueError(
+                'command_duration_sec must be <= 90%% of the control period '
+                '(%.3fs at %.1fHz)' % (max_stream_duration, rate))
         self._last_tick = time.monotonic()
         self._timer = self.create_timer(1.0 / rate, self._control_tick)
         self._publish_enabled()
@@ -123,7 +132,7 @@ class ArmTeleopNode(Node):
             'translation_speed_cm_sec': 1.0,
             'pitch_speed_deg_sec': 10.0,
             'gripper_speed_sec': 0.5,
-            'command_duration_sec': 0.12,
+            'command_duration_sec': 0.09,
             'home_duration_sec': 2.0,
             'home_target': [15.0, 0.0, 2.0, -54.48],
             'home_joint_deg': [0.0, 112.08, -89.04, -77.52, 0.0],
@@ -165,6 +174,7 @@ class ArmTeleopNode(Node):
                 self._shadow_estop_latched = self._shadow
                 self._startup_sync_allowed = False
                 self._home_pending_seq = None
+                self._home_completion_seen = False
                 self._lose_sync('B emergency stop')
 
         if rising_edge(buttons, previous, BUTTON_A):
@@ -195,17 +205,32 @@ class ArmTeleopNode(Node):
         if msg.state in (ArmState.STATE_ERROR, ArmState.STATE_ESTOP):
             self._startup_sync_allowed = False
             self._home_pending_seq = None
+            self._home_completion_seen = False
             self._lose_sync('arm state is ERROR/ESTOP')
             return
 
         if self._home_pending_seq is not None:
-            if (msg.sequence_id == self._home_pending_seq
-                    and msg.state == ArmState.STATE_SUCCEEDED):
-                self._target = replace(
-                    self._home_target, gripper=self._target.gripper)
-                self._home_pending_seq = None
-                self._synced = True
-                self.get_logger().info('home completed; target synchronized')
+            if msg.sequence_id != self._home_pending_seq:
+                return
+            if msg.state == ArmState.STATE_SUCCEEDED:
+                self._home_completion_seen = True
+            if (self._home_completion_seen and msg.position_valid
+                    and joints_near_home(
+                        msg.joint_position,
+                        self._expected_home_joints,
+                        self._home_tolerance)):
+                self._home_samples += 1
+                if self._home_samples >= int(
+                        self._cfg('home_stable_samples')):
+                    self._target = replace(
+                        self._home_target, gripper=self._target.gripper)
+                    self._home_pending_seq = None
+                    self._home_completion_seen = False
+                    self._synced = True
+                    self.get_logger().info(
+                        'home feedback verified; target synchronized')
+            elif self._home_completion_seen:
+                self._home_samples = 0
             return
 
         healthy = msg.state in (ArmState.STATE_IDLE,
@@ -346,7 +371,8 @@ class ArmTeleopNode(Node):
                 or self._home_pending_seq is not None):
             return
         if not self._shadow:
-            reason = self._state_block_reason(time.monotonic())
+            reason = self._state_block_reason(
+                time.monotonic(), require_position=False)
             if reason:
                 self.get_logger().warn('home rejected: %s' % reason)
                 return
@@ -363,6 +389,8 @@ class ArmTeleopNode(Node):
                 'shadow home completed; target synchronized')
         else:
             self._home_pending_seq = seq
+            self._home_completion_seen = False
+            self._home_samples = 0
             self.get_logger().info('home command sent; waiting for completion')
 
     def _publish_command(self, mode, target, duration):
@@ -411,12 +439,12 @@ class ArmTeleopNode(Node):
             return self._state_block_reason(now)
         return ''
 
-    def _state_block_reason(self, now):
+    def _state_block_reason(self, now, require_position=True):
         if self._latest_state is None or self._last_state_time is None:
             return 'no ArmState received'
         if now - self._last_state_time > float(self._cfg('state_timeout_sec')):
             return 'ArmState is stale'
-        if not self._latest_state.position_valid:
+        if require_position and not self._latest_state.position_valid:
             return 'joint feedback is not valid'
         if self._latest_state.state == ArmState.STATE_MOVING:
             return 'arm is moving'
