@@ -1,6 +1,6 @@
 # 机械臂控制接口契约
 
-状态：`v0.1 draft`
+状态：`v0.2 draft`
 
 适用分支：`feature/control`
 
@@ -44,42 +44,71 @@ STOP
 
 | Topic | 类型 | 内容 |
 | --- | --- | --- |
-| `/status_topic` | `std_msgs/msg/String` | STM32 返回的 8 字节状态文本 |
+| `/status_topic` | `std_msgs/msg/String` | ROS 将 v2 生命周期映射为旧 8 字节调试文本 |
 
-### 2.3 当前 I2C 边界
+### 2.3 I2C v2 边界
 
 | 项目 | 当前值 |
 | --- | --- |
 | I2C bus | `5` |
 | slave address | `0x30` |
 | command packet | 固定 32 字节 |
-| status packet | 固定 8 字节 |
+| status packet | 固定 32 字节 |
+| protocol version | `2` |
 
-当前命令包布局：
+命令头统一为：
 
 ```text
-ARM:
-  byte 0       = 'A'
-  byte 4..7    = x, float32 little-endian
-  byte 8..11   = y, float32 little-endian
-  byte 12..15  = z, float32 little-endian
-  byte 16..19  = pitch, float32 little-endian
-  byte 20..23  = min_pitch, float32 little-endian
-  byte 24..27  = max_pitch, float32 little-endian
-  byte 28..31  = time, uint32 little-endian
-
-SERVO:
-  byte 0       = 'P'
-  byte 4       = servo_id, uint8, range 1..6
-  byte 8..11   = angle, float32 little-endian
-  byte 12..15  = duration, uint32 little-endian milliseconds
-
-STOP:
-  byte 0       = 'S'
+byte 0       = tag: 'A' / 'P' / 'S'
+byte 1       = protocol_version: uint8, fixed 2
+byte 2..5    = wire_command_id: uint32 little-endian
+byte 6..7    = duration_ms: uint16 little-endian; motion range 1..30000,
+               STOP fixed 0
 ```
 
-`SERVO duration=0` 由固件按兼容默认值 `1000 ms` 处理；固件实际传给串口
-舵机的时长限制为 `1..65535 ms`。
+`wire_command_id` 由 ROS 控制器为每次硬件写入单独生成；它与公共
+`ArmCommand.sequence_id` 分离，由控制器维护二者映射。这样旧字符串调用者使用
+`sequence_id=0` 时仍能可靠关联固件响应。
+
+各命令 payload：
+
+```text
+ARM ('A'):
+  byte 8..11   = x, float32 little-endian
+  byte 12..15  = y, float32 little-endian
+  byte 16..19  = z, float32 little-endian
+  byte 20..23  = pitch, float32 little-endian
+  byte 24..27  = min_pitch, float32 little-endian
+  byte 28..31  = max_pitch, float32 little-endian
+
+SERVO ('P'):
+  byte 8       = servo_id, uint8, range 1..6
+  byte 12..15  = position_raw, float32 little-endian
+
+STOP ('S'):
+  no payload
+```
+
+状态包布局：
+
+```text
+byte 0       = magic: 0xA5
+byte 1       = protocol_version: uint8, fixed 2
+byte 2       = lifecycle: READY=0, ACCEPTED=1, EXECUTING=2,
+               COMPLETED=3, FAILED=4
+byte 3       = firmware_error
+byte 4..7    = wire_command_id: uint32 little-endian
+byte 8..31   = servo 1..6 raw position, float32 little-endian
+```
+
+`firmware_error` 稳定值：`0=NONE`、`1=BAD_PROTOCOL`、`2=BAD_COMMAND`、
+`3=ARM_NOT_READY`、`4=NO_IK_SOLUTION`、`5=SERVO_WRITE_FAILED`、
+`6=SERVO_FEEDBACK_FAILED`、`7=MOTION_TIMEOUT`。
+
+ROS 只有在 `wire_command_id` 与当前命令匹配时才接受
+`ACCEPTED/EXECUTING/COMPLETED/FAILED`。任何可读但 ID 不匹配的状态只能证明
+I2C 链路存活，不能清除命令确认 watchdog。旧版文本状态包不能驱动普通运动；
+协议版本不匹配时只保留 STOP 能力并进入错误状态。
 
 末端坐标 `x/y/z` 的固件单位已确认为厘米（cm）；其他字段仍应以类型化接口和配置契约为准。当前字符串接口只用于联调，不作为稳定公共 API。
 
@@ -240,9 +269,7 @@ id 1。关节直接控制仍保持禁用，直到关节限位和实机方向完�
 
 ## 7. 当前缺口
 
-- 当前只有字符串命令，没有 `ArmCommand` 和 `ArmState`；
-- `/status_topic` 只有 8 字节文本，不能表达结构化执行状态；
-- 没有真实关节位置反馈契约；
+- v2 协议与真实关节反馈仍需完成固件构建、烧录和故障注入验收；
 - 末端 `x/y/z` 单位已确认为厘米（cm），pitch 等剩余物理语义仍需与 STM32 固件保持一致；
 - 舵机 ID 映射、软限位、急停和通信失败行为尚未完成实机验证。
 
