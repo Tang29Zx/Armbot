@@ -58,6 +58,42 @@
 - 当前节点维护的是“最后一次命令目标”，不是实测末端坐标。由于完成状态不可靠，
   维护目标已经可能与真实机械臂姿态脱节。
 
+## P1：Home 未先打开夹爪
+
+状态：**已验证，待用户验收**
+
+### 现象与根因
+
+- 2026-07-15：用户实机确认复位时夹爪不动作，期望先打开夹爪，再恢复机械臂
+  Home 位置。
+- `arm_teleop_node.py` 的 `_request_home()` 当前只发布
+  `MODE_END_EFFECTOR`，并保留当前夹爪目标；该命令在固件中只控制 6～3 号舵机，
+  不会向 1 号夹爪发出打开命令。因此现象由当前 Home 命令设计直接造成，不是夹爪
+  舵机失效。
+
+### 影响
+
+夹爪闭合或夹持物体时整臂直接回到 Home，可能造成物体、夹爪或周边结构碰撞。
+
+### 已修改
+
+- Home 改为两阶段状态机：先发布 `MODE_GRIPPER/gripper_position=0`；真实模式只有在
+  收到该命令对应序号的 `STATE_SUCCEEDED` 后，才发布机械臂 Home 命令。
+- 夹爪打开阶段发生固件错误或急停时会清除 Home 阶段状态，不再继续恢复整臂。
+- 新增 `home_gripper_duration_sec=1.0`，夹爪完整打开不复用 90 ms 的连续遥控时长。
+- 回归测试在修改前实际失败，旧实现只发布 `[MODE_END_EFFECTOR]`；修改后固定为
+  `[MODE_GRIPPER, MODE_END_EFFECTOR]`，并验证夹爪错误时发布计数保持为 1。
+- `action_interfaces + action_pkg` 隔离构建通过；`colcon test-result --verbose` 为
+  67 tests、0 failures、0 errors、1 个既有 copyright skip。尚未部署到 RDK 或
+  执行机械臂实机动作，因此仍需用户验收。
+
+### 关闭标准
+
+- Home 首先发布 `MODE_GRIPPER/gripper_position=0`，只有夹爪命令成功完成后才发布
+  `MODE_END_EFFECTOR` 恢复机械臂位置。
+- 夹爪打开失败、急停或错误时不得继续发送机械臂 Home。
+- 自动测试覆盖命令顺序；实机重复 Home，确认夹爪完全打开后整臂才开始运动。
+
 ## P0：运动完成状态可能误报
 
 状态：**v2 实机已确认反馈失败会返回 FAILED；待完成成功运动、超时和断线故障注入验收，仍阻塞验收**

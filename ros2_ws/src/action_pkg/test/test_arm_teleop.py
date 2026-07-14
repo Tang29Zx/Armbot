@@ -5,7 +5,7 @@ import math
 import time
 from unittest.mock import MagicMock
 
-from action_interfaces.msg import ArmState
+from action_interfaces.msg import ArmCommand, ArmState
 from action_pkg.arm_teleop_node import ArmTeleopNode
 import pytest
 import rclpy
@@ -94,9 +94,15 @@ def test_b_latches_shadow_estop_until_reset_then_home(shadow_node):
 
     shadow_node._request_home()
     assert shadow_node._synced
-    published = shadow_node._command_pub.publish.call_args.args[0]
-    assert published.x == 15.0
-    assert published.pitch == pytest.approx(-54.48)
+    published = [call.args[0]
+                 for call in shadow_node._command_pub.publish.call_args_list]
+    assert [msg.mode for msg in published] == [
+        ArmCommand.MODE_GRIPPER,
+        ArmCommand.MODE_END_EFFECTOR,
+    ]
+    assert published[0].gripper_position == 0.0
+    assert published[1].x == 15.0
+    assert published[1].pitch == pytest.approx(-54.48)
 
 
 def test_joy_timeout_disables_and_requires_home(shadow_node):
@@ -170,10 +176,17 @@ def test_explicit_home_requires_three_valid_feedback_samples(
     node._state_callback(state)
     node._request_home()
 
-    published = node._command_pub.publish.call_args.args[0]
+    opened = node._command_pub.publish.call_args.args[0]
+    assert opened.mode == ArmCommand.MODE_GRIPPER
+    assert opened.gripper_position == 0.0
+    assert node._command_pub.publish.call_count == 1
     state.state = ArmState.STATE_SUCCEEDED
-    state.sequence_id = published.sequence_id
+    state.sequence_id = opened.sequence_id
     node._state_callback(state)
+    published = node._command_pub.publish.call_args.args[0]
+    assert published.mode == ArmCommand.MODE_END_EFFECTOR
+    assert node._command_pub.publish.call_count == 2
+    state.sequence_id = published.sequence_id
 
     node._joy_valid = True
     node._last_joy_time = time.monotonic()
@@ -199,6 +212,30 @@ def test_explicit_home_requires_three_valid_feedback_samples(
     rclpy.shutdown()
 
 
+def test_home_stops_if_gripper_open_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    rclpy.init()
+    node = ArmTeleopNode()
+    node._command_pub = MagicMock()
+
+    state = ArmState()
+    state.state = ArmState.STATE_IDLE
+    node._state_callback(state)
+    node._request_home()
+    opened = node._command_pub.publish.call_args.args[0]
+
+    state.state = ArmState.STATE_ERROR
+    state.sequence_id = opened.sequence_id
+    node._state_callback(state)
+
+    assert node._command_pub.publish.call_count == 1
+    assert node._home_open_pending_seq is None
+    assert node._home_pending_seq is None
+    assert node._synced is False
+    node.destroy_node()
+    rclpy.shutdown()
+
+
 def test_home_feedback_outside_tolerance_does_not_sync(
         tmp_path, monkeypatch):
     monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
@@ -209,7 +246,10 @@ def test_home_feedback_outside_tolerance_does_not_sync(
     state.state = ArmState.STATE_IDLE
     node._state_callback(state)
     node._request_home()
+    opened = node._command_pub.publish.call_args.args[0]
     state.state = ArmState.STATE_SUCCEEDED
+    state.sequence_id = opened.sequence_id
+    node._state_callback(state)
     state.sequence_id = node._home_pending_seq
     state.position_valid = True
     state.joint_position = [1.0] * 5

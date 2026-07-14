@@ -97,6 +97,7 @@ class ArmTeleopNode(Node):
         self._state_timed_out = False
         self._home_samples = 0
         self._next_sequence = 1
+        self._home_open_pending_seq = None
         self._home_pending_seq = None
         self._home_completion_seen = False
         self._reset_future = None
@@ -134,6 +135,7 @@ class ArmTeleopNode(Node):
             'pitch_speed_deg_sec': 10.0,
             'gripper_speed_sec': 0.5,
             'command_duration_sec': 0.09,
+            'home_gripper_duration_sec': 1.0,
             'home_duration_sec': 2.0,
             'home_target': [15.0, 0.0, 2.0, -54.48],
             'home_joint_deg': [0.0, 112.08, -89.04, -77.52, 0.0],
@@ -174,6 +176,7 @@ class ArmTeleopNode(Node):
             if b_pressed:
                 self._shadow_estop_latched = self._shadow
                 self._startup_sync_allowed = False
+                self._home_open_pending_seq = None
                 self._home_pending_seq = None
                 self._home_completion_seen = False
                 self._lose_sync('B emergency stop')
@@ -212,9 +215,21 @@ class ArmTeleopNode(Node):
 
         if msg.state in (ArmState.STATE_ERROR, ArmState.STATE_ESTOP):
             self._startup_sync_allowed = False
+            self._home_open_pending_seq = None
             self._home_pending_seq = None
             self._home_completion_seen = False
             self._lose_sync('arm state is ERROR/ESTOP')
+            return
+
+        if self._home_open_pending_seq is not None:
+            if msg.sequence_id != self._home_open_pending_seq:
+                return
+            if msg.state == ArmState.STATE_SUCCEEDED:
+                self._home_open_pending_seq = None
+                self._target = replace(self._target, gripper=0.0)
+                self._start_home_arm()
+                self.get_logger().info(
+                    'gripper open completed; home arm command sent')
             return
 
         if self._home_pending_seq is not None:
@@ -376,6 +391,7 @@ class ArmTeleopNode(Node):
                 'home rejected: shadow estop is still latched')
             return
         if (self._reset_future is not None
+                or self._home_open_pending_seq is not None
                 or self._home_pending_seq is not None):
             return
         if not self._shadow:
@@ -385,21 +401,31 @@ class ArmTeleopNode(Node):
                 self.get_logger().warn('home rejected: %s' % reason)
                 return
 
-        target = replace(self._home_target, gripper=self._target.gripper)
+        target = replace(self._home_target, gripper=0.0)
         seq = self._publish_command(
-            ArmCommand.MODE_END_EFFECTOR,
+            ArmCommand.MODE_GRIPPER,
             target,
-            float(self._cfg('home_duration_sec')))
+            float(self._cfg('home_gripper_duration_sec')))
         if self._shadow:
+            self._start_home_arm()
+            self._home_pending_seq = None
             self._target = target
             self._synced = True
             self.get_logger().info(
                 'shadow home completed; target synchronized')
         else:
-            self._home_pending_seq = seq
-            self._home_completion_seen = False
-            self._home_samples = 0
-            self.get_logger().info('home command sent; waiting for completion')
+            self._home_open_pending_seq = seq
+            self.get_logger().info(
+                'gripper open command sent; waiting before home arm motion')
+
+    def _start_home_arm(self):
+        target = replace(self._home_target, gripper=0.0)
+        self._home_pending_seq = self._publish_command(
+            ArmCommand.MODE_END_EFFECTOR,
+            target,
+            float(self._cfg('home_duration_sec')))
+        self._home_completion_seen = False
+        self._home_samples = 0
 
     def _publish_command(self, mode, target, duration):
         msg = ArmCommand()
@@ -440,7 +466,8 @@ class ArmTeleopNode(Node):
             neutral = False
         if not neutral:
             return 'sticks and triggers must be neutral'
-        if (self._home_pending_seq is not None
+        if (self._home_open_pending_seq is not None
+                or self._home_pending_seq is not None
                 or self._reset_future is not None):
             return 'home/reset operation is in progress'
         if not self._shadow:
