@@ -37,6 +37,12 @@
 
 ## 已验证记录
 
+- 2026-07-14：单控制栈 rosbag 证明，RT 闭合后左摇杆期间 ROS 只发布 A 命令、没有
+  发布打开用的 P 命令，但舵机 1 仍从约 `raw 693` 回到约 `raw 231`。直接根因是
+  开机 reset 给 1 号保存了 `raw≈226/2000 ms` 的 `MOVE_TIME_WAIT_WRITE`；后续 A
+  只更新 6～3 号却广播 `MOVE_START`，从而重放 1 号残留的 reset-open 目标。ARM
+  批次必须只 START 本次预写的 6、5、4、3 号；广播 START 只能用于明确覆盖了全部
+  相关舵机 WAIT 目标的批次。
 - 2026-07-14：独立只读固件对舵机 1～6 连续读取完整 9 字节，均为
   `00 55 55 ID 05 1C posL posH checksum`，解析结果
   `rx=OK/uart=0x00/skip=1/checksum valid`。舵机断电时每次请求仍收到单独的

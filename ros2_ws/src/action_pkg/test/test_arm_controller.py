@@ -329,6 +329,11 @@ def test_matching_firmware_failure_maps_to_current_command(node):
     node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=3,
                              x=0.0, y=0.0, z=0.0, pitch=0.0,
                              duration_sec=1.0))
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER, seq=4,
+        gripper_position=1.0, duration_sec=0.09))
+    assert node._queued_command is not None
+
     node._i2c_read_status = lambda: _status(
         FW_LIFECYCLE_FAILED, node._active_wire_id,
         FW_ERROR_NO_IK_SOLUTION)
@@ -336,6 +341,7 @@ def test_matching_firmware_failure_maps_to_current_command(node):
 
     assert node._state == ArmState.STATE_ERROR
     assert node._error_code == ERR_FW_NO_SOLVE
+    assert node._queued_command is None
     assert node._last_sequence_id == 3
 
 
@@ -443,6 +449,76 @@ def test_different_motion_modes_wait_for_completion(node):
     assert node._active_seq == 2
 
 
+def test_newer_arm_command_discards_queued_gripper(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    arm = {'x': 15.0, 'y': 0.1, 'z': 2.0, 'pitch': -54.48,
+           'duration_sec': 0.09}
+
+    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=1, **arm))
+    first_arm_wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_ACCEPTED, first_arm_wire_id)
+    node.poll_status()
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER, seq=2,
+        gripper_position=0.0, duration_sec=0.09))
+    node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=3, **arm))
+    latest_arm_wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_COMPLETED, latest_arm_wire_id)
+    node.poll_status()
+
+    assert [packet[0] for packet in writes] == [ord('A'), ord('A')]
+    assert node._queued_command is None
+
+
+def test_newer_gripper_command_discards_queued_arm(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER, seq=1,
+        gripper_position=1.0, duration_sec=0.09))
+    first_gripper_wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_ACCEPTED, first_gripper_wire_id)
+    node.poll_status()
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_END_EFFECTOR, seq=2,
+        x=15.0, y=0.1, z=2.0, pitch=-54.48, duration_sec=0.09))
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER, seq=3,
+        gripper_position=0.0, duration_sec=0.09))
+    latest_gripper_wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_COMPLETED, latest_gripper_wire_id)
+    node.poll_status()
+
+    assert [packet[0] for packet in writes] == [ord('P'), ord('P')]
+    assert node._queued_command is None
+
+
+def test_stop_clears_queued_command(node):
+    node.handle_command(_cmd(
+        ArmCommand.MODE_END_EFFECTOR, seq=1,
+        x=15.0, y=0.1, z=2.0, pitch=-54.48, duration_sec=0.09))
+    active_wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_ACCEPTED, active_wire_id)
+    node.poll_status()
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER, seq=2,
+        gripper_position=1.0, duration_sec=0.09))
+    assert node._queued_command is not None
+
+    node.handle_command(_cmd(ArmCommand.MODE_STOP, seq=3))
+
+    assert node._queued_command is None
+
+
 # ===================== sec 5.5 I2C failure threshold =====================
 def test_i2c_failure_threshold_latches_error(node):
     bus = __import__('unittest.mock', fromlist=['MagicMock']).MagicMock()
@@ -473,11 +549,16 @@ def test_command_timeout_reports_error(node):
     node._i2c_read_status = lambda: None
     node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=1,
                              x=0.0, y=0.0, z=0.0, pitch=0.0, duration_sec=1.0))
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER, seq=2,
+        gripper_position=1.0, duration_sec=0.09))
+    assert node._queued_command is not None
     assert node._state == ArmState.STATE_MOVING
     time.sleep(0.15)
     node.poll_status()  # triggers the watchdog
     assert node._error_code == ERR_CMD_TIMEOUT
     assert node._state == ArmState.STATE_ERROR
+    assert node._queued_command is None
 
 
 # ===================== legacy compatibility layer =====================

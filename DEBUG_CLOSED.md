@@ -8,4 +8,134 @@
 日期。已关闭问题再次出现时，将原条目移回 `DEBUG.md`，追加重新打开记录，不重复
 创建问题。
 
-当前暂无已关闭问题。
+## P0：夹爪闭合后笛卡尔输入导致反向打开并报错
+
+状态：**用户已验收，已关闭**
+
+### 现象
+
+- 2026-07-14：用户实机确认 RT 可先闭合夹爪；随后推动左摇杆，夹爪立即打开。
+- 异常发生后继续按 RT 无反应；按 LT 时夹爪先闭合再打开，随后系统进入错误。
+- 故障后的 RDK 快照为 `sequence_id=1341/state=SUCCEEDED/error_code=0`、
+  `gripper_position≈0.056`（接近打开）、`position_valid=false`、
+  `/arm/teleop_enabled=false`。该快照证明最终反馈接近打开且关节反馈失效，但尚未
+  证明是哪一条命令造成反向动作。
+- 随后在机械臂静止、`sequence_id=1341` 不变时连续观察 5 秒，
+  `position_valid` 至少 3 次短暂从 `true` 变为 `false` 后恢复，期间
+  `state=SUCCEEDED/error_code=0`、夹爪反馈仍约 `0.056`。这证明当前仍有间歇性
+  机械臂舵机回读失败；它足以在运动跟踪期间触发错误，但尚不能解释夹爪为何发生
+  实际反向动作。
+- 2026-07-14：用户部署 `9ac3380` 后确认原现象仍存在，上一版 ROS 修改未通过实机
+  验收。当前静止 Joy 样本的四个摇杆轴均为 0、RT/LT 均为 `+1.0`，再次排除静止
+  轴漂移和扳机方向互串。
+- 最新实机日志中舵机 1 raw 多次在约 `228 ↔ 693` 之间真实往返，证明反向动作不是
+  UI 显示错误。当前 `ERROR 36/wire_id=1318` 是 Home/机械臂运动期间的目标舵机反馈
+  失败，当时舵机 1 始终约为 231；该错误是并存的反馈问题，不是夹爪反向命令本身。
+
+### 已确认的软件根因
+
+- 遥控映射规定 RT 增加归一化夹爪值（闭合），LT 减少（打开）；现有纯映射测试
+  覆盖该方向。
+- 笛卡尔输入优先于扳机输入，但 `integrate_target()` 的笛卡尔分支会保留当前
+  `Target.gripper`；`MODE_END_EFFECTOR` 在控制器中只发送 ARM I2C 包，不主动写
+  舵机 1。因此“左摇杆命令本身直接要求打开夹爪”没有代码证据。
+- 控制器原来只等固件返回 `ACCEPTED`，没有等前一模式返回 `COMPLETED`，便允许另一
+  模式写入。固件执行 `P` 时会清空机械臂运动跟踪，执行 `A` 时也会重建运动跟踪；
+  因此 `P → A` 或 `A → P` 会丢失前一运动的完成归属，排队的夹爪目标还可能延迟到
+  后续操作才执行。新增回归测试在修改前实际捕获到夹爪仅确认后就写出 `[P, A]`。
+- 遥控节点原来仅在遥控禁用时用真实 `gripper_position` 更新内部目标。内部目标到达
+  `1.0` 后，即使夹爪反馈已经回到接近打开，RT 仍会因“目标没有变化”而不发布；
+  新增回归测试在修改前复现了反馈为 `0.05`、内部目标仍保持 `1.0`。
+- 上一版跨模式屏障仍有遗漏：活动 `A` 执行时，旧 `P` 会进入 `_queued_command`；
+  后续更新的同模式 `A` 可以立即发送，但 `_accept_motion()` 没有清除更旧的排队
+  `P`。当最新 `A` 完成时，`_flush_queued_command()` 会把旧 `P` 补发。
+- 纯软件复现已得到确定序列：`A(active) → P(seq=2 queued) → A(seq=3 newer) →
+  A completed` 的实际写包为 `[A, A, P]`，且最后执行的 `P` 仍是旧 `seq=2`。
+  这能直接解释旧 RT/LT 目标延迟出现，以及“先闭合再打开”的错序动作。
+- `integrate_target()` 明确给予笛卡尔摇杆优先级；摇杆未回到死区时，即使按 RT/LT
+  也不会生成夹爪命令。这解释了异常期间 RT 看似无反应，但不能单独造成反向动作。
+
+### 已修改
+
+- 控制器记录当前活动命令模式。同模式的 10 Hz 流式更新仍可在确认后替换；不同模式
+  必须等当前命令 `COMPLETED` 后才发送，失败、停止、超时、协议错误和固件重启会
+  同时清理活动模式与队列。
+- 遥控启用期间，只要 RT/LT 均已松开，就用真实夹爪反馈校正内部目标；按住任一扳机
+  时不回写，避免滞后的反馈抵消当前操作。
+- ROS 隔离构建成功；`colcon test-result --verbose` 为 62 tests、0 failures、
+  0 errors、1 个既有 copyright skip。新增测试覆盖跨模式完成屏障和启用状态下的
+  夹爪反馈同步。
+- 以上修改已经随 `9ac3380` 部署，但实机验证失败。跨模式完成屏障保留，仍需增加
+  “任何更新命令都取消更旧排队意图”的规则，并为 dispatch 日志补充 `A/P` 模式，
+  才能把实机 wire id 与具体命令直接关联。
+- 2026-07-14：`_accept_motion()` 已增加“最新意图覆盖旧等待意图”规则。新命令因
+  ACK 或跨模式屏障不能立即发送时替换队列；可以立即发送时先取消更旧队列，避免
+  活动命令完成后补发过期的 `A/P`。dispatch、排队、替换和取消均增加 DEBUG 级
+  `A/P + sequence_id + wire_id` 诊断，不增加 10 Hz INFO 日志。
+- 修改前新增测试稳定复现 `[A, A, P]` 和 `[P, P, A]`；修改后分别固定为
+  `[A, A]` 和 `[P, P]`。测试同时覆盖跨模式正常等待以及 STOP、固件 FAILED、
+  ACK timeout 清理队列。
+- 本地 `colcon build --packages-select action_pkg` 成功；
+  `colcon test-result --verbose` 为 65 tests、0 failures、0 errors、1 个既有
+  copyright skip。
+- 2026-07-14 22:32：新控制器已部署至 RDK 并用项目脚本完成
+  `action_interfaces + action_pkg` 构建。旧 launch 通过 SIGINT 退出，控制器清理路径
+  已下发 STOP；确认旧进程退出后才启动新 launch，没有两个控制器并发占用 I2C。
+  RDK 实际加载的 `build/action_pkg/action_pkg/arm_controller_node.py` 与本地源码
+  SHA-256 均为 `4e292c1b3c4e300a2792dfa4c05a86b0c01f400b45c5a942b219b6f44d661ea7`。
+  重启后节点为 `IDLE/sequence_id=0/position_valid=true/error_code=0`；本轮没有执行
+  Home、启用遥控或发送运动命令，仍需用户完成实机动作验收，因此本条不得归档。
+- 2026-07-14 22:39：用户实机复测仍出现夹爪打开和错误。只读检查确认 RDK 同时
+  运行两套完整控制栈：22:32 的后台 launch（controller PID 8993）与 22:39 的终端
+  launch（controller PID 9957）共同占用同一个 I2C 地址。ROS 图中 controller、
+  teleop 和 joy 均出现两个同名节点。
+- 双 controller 各自从 `wire_id=1` 独立计数。22:39 日志中的固件状态序号实际出现
+  `56 -> 9`、`32 -> 59` 等跨进程跳变；一个 controller 等待自己的
+  `wire_id=7/8/33` 时，固件已经被另一个 controller 的 `wire_id=29/56/64` 覆盖，
+  因而产生 `ERR_CMD_TIMEOUT (0x0016)`。同一时段舵机 1 raw 实际在
+  `231 -> 693 -> 207 -> 693` 之间往返。
+- 旧 I2C v1 没有命令 ID，任一 controller 会把任何可读的文本状态当成当前命令的
+  确认，因此同样的多进程写入不会报告 ID 不匹配，只会被状态机掩盖。v2 的严格
+  ID 匹配暴露了违反“单一 I2C 所有者”契约的问题；当前证据不支持把反向动作归因
+  于 v2 包内的夹爪方向字段。
+- 已终止 22:32 遗留的后台 launch 及其三个孤儿子进程，保留用户终端中的 22:39
+  控制栈。DDS 节点图复核只剩一个 controller、teleop 和 joy。此前冲突留下的
+  `ERROR 36/wire_id=64` 仍锁存，必须安全解除错误并重新 Home 后，记录单实例下的
+  `/joy`、`/arm/command`、`/arm/state` 与 dispatch 日志再判断反向动作是否仍存在。
+- 22:47～22:51 的单实例 rosbag 已记录 `/joy`、`/arm/command`、`/arm/state` 和
+  `/rosout`。RT 闭合阶段只有 `P seq=111..130`，目标从 `0.081` 单调增加到
+  `1.000`；随后左摇杆阶段只有 `A seq=131..200`，没有任何打开用的 `P` 命令。
+  但舵机 1 反馈仍从 `raw 693/gripper=0.986` 连续下降到
+  `raw 231/gripper=0.062`，证明反向动作发生在 STM32 的 A 执行路径之后。
+- 固件开机 `robot_arm_reset(2000)` 会对 1～6 号舵机发送
+  `MOVE_TIME_WAIT_WRITE`，其中 1 号保存约 `raw 226/2000 ms` 的打开目标，再用广播
+  `MOVE_START` 启动。后续 P 使用普通 `MOVE_TIME_WRITE` 闭合夹爪，不会覆盖舵机内
+  保存的 WAIT 目标；A 只更新 6～3 号 WAIT，却再次广播 `MOVE_START`，因此同时
+  重放了 1 号残留的 reset-open 目标。最后一条 A 后夹爪继续约 2 秒才到打开端，也
+  与残留 reset WAIT 的 `2000 ms` 时长一致。
+- `robot_arm.c` 的 A 路径已改为只向本次预写的 6、5、4、3 号分别发送
+  `MOVE_START`，不再使用广播；开机 reset 仍对完整 1～6 号集合使用广播。
+  `serial_servo.c/.h` 新增按指定 ID 启动 WAIT 目标的 helper，I2C v2 包布局、夹爪
+  方向和 ROS 消息均未改变。
+- 修改后的 `robot_arm.c`、`serial_servo.c` 已通过 STM32 GNU 14.3.1 Cortex-M3
+  目标对象编译；反汇编确认 `theta2servo()` 只调用按 ID 启动 helper，不调用广播
+  helper。现有 I2C 协议/串口回包静态测试和目标对象编译通过，相关源码
+  `cppcheck` 通过。
+- Windows 本地临时目录中的 Keil ARMCC 5.06 全量构建已通过：`0 Error(s),
+  7 Warning(s)`，7 项均为仓库既有的未使用符号或文件末尾换行告警；生成
+  `LeArm.hex`（79730 bytes，SHA-256
+  `59c75ed04e6e64d826272c7ad55436df5ed71d9ffa677ec178681e5127dd2a09`）。ROS
+  `action_pkg` 回归仍为 65 tests、0 failures、0 errors、1 skipped。当前只剩烧录和
+  实机复测，不能在烧录前把本条标为已验证。
+
+### 关闭标准
+
+- 捕获 `RT 闭合 → 左摇杆 → RT/LT` 期间的 `/joy`、`/arm/command`、固件命令状态
+  和夹爪 raw 反馈，明确首条反向动作对应的命令。
+- 修复后笛卡尔运动不得改变夹爪；RT 始终只闭合、LT 始终只打开。
+- 连续交替操作至少 30 次无反向动作、无命令乱序和无错误状态。
+
+### 用户验收
+
+- 2026-07-14：用户在本轮明确确认该问题已经解决，同意将本地修改提交。
+- 关闭日期：2026-07-14

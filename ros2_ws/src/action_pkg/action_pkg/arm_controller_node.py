@@ -133,6 +133,10 @@ def _legacy_status_text(lifecycle, error):
     return 'ARM_ERR_'
 
 
+def _motion_mode_tag(mode):
+    return 'A' if mode == ArmCommand.MODE_END_EFFECTOR else 'P'
+
+
 # I2C failures before we latch into STATE_ERROR (contract sec 5.5)
 I2C_FAIL_THRESHOLD = 5
 
@@ -369,12 +373,37 @@ class ArmControllerNode(Node):
         seq = int(cmd.sequence_id)
         if seq > 0:
             self._last_applied_seq = seq
-        if (self._pending_motion
-                or (self._active_wire_id != 0
-                    and self._active_mode != cmd.mode)):
+        blocked_by_ack = self._pending_motion
+        blocked_by_mode = (
+            self._active_wire_id != 0 and self._active_mode != cmd.mode)
+        if blocked_by_ack or blocked_by_mode:
+            previous = self._queued_command
             self._queued_command = copy.deepcopy(cmd)
+            reason = 'awaiting_ack' if blocked_by_ack else 'active_mode'
+            if previous is None:
+                self.get_logger().debug(
+                    '[motion queue] queued mode=%s seq=%d reason=%s'
+                    % (_motion_mode_tag(cmd.mode), seq, reason))
+            else:
+                self.get_logger().debug(
+                    '[motion queue] replaced mode=%s seq=%d with mode=%s '
+                    'seq=%d reason=%s'
+                    % (_motion_mode_tag(previous.mode),
+                       int(previous.sequence_id),
+                       _motion_mode_tag(cmd.mode), seq, reason))
             self._set_state(ArmState.STATE_MOVING, seq)
             return
+
+        # A command that can run now is the newest operator intent. Do not let
+        # an older cross-mode command survive and replay after this one finishes.
+        if self._queued_command is not None:
+            previous = self._queued_command
+            self._queued_command = None
+            self.get_logger().debug(
+                '[motion queue] canceled mode=%s seq=%d by mode=%s seq=%d'
+                % (_motion_mode_tag(previous.mode),
+                   int(previous.sequence_id),
+                   _motion_mode_tag(cmd.mode), seq))
         self._dispatch_motion(cmd)
 
     def _dispatch_motion(self, cmd):
@@ -391,6 +420,9 @@ class ArmControllerNode(Node):
         self._active_mode = cmd.mode
         self._set_state(ArmState.STATE_MOVING, seq)
         self._arm_pending_motion(seq, wire_id)
+        self.get_logger().debug(
+            '[motion dispatch] mode=%s seq=%d wire_id=%d'
+            % (_motion_mode_tag(cmd.mode), seq, wire_id))
         return True
 
     def _flush_queued_command(self):
