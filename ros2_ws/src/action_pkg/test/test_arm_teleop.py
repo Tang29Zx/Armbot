@@ -232,15 +232,24 @@ def test_stationary_gripper_without_progress_is_not_contact(
     rclpy.shutdown()
 
 
-def test_releasing_close_trigger_holds_current_feedback(
+def test_releasing_close_trigger_stops_without_feedback_hold(
         tmp_path, monkeypatch):
     monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
     rclpy.init()
     node = ArmTeleopNode()
     node._command_pub = MagicMock()
     node._enabled = True
+    node._joy_valid = True
     node._axes[4] = -1.0
     node._target = replace(node._target, gripper=0.7)
+
+    node._last_tick = time.monotonic() - 0.1
+    node._control_tick()
+    close = node._command_pub.publish.call_args.args[0]
+    assert close.mode == ArmCommand.MODE_GRIPPER
+    assert node._gripper_close_command_active
+    close_target = node._target.gripper
+    node._command_pub.reset_mock()
 
     state = ArmState()
     state.state = ArmState.STATE_MOVING
@@ -248,14 +257,32 @@ def test_releasing_close_trigger_holds_current_feedback(
     state.gripper_position = 0.3
     node._state_callback(state)
 
-    node._axes[4] = 1.0
+    node._joy_callback(_joy())
+    stop = node._command_pub.publish.call_args.args[0]
+    assert stop.mode == ArmCommand.MODE_GRIPPER_STOP
+    assert node._target.gripper == pytest.approx(close_target)
+    assert node._gripper_stop_pending_seq == stop.sequence_id
+
+    node._command_pub.reset_mock()
     state.gripper_position = 0.32
     node._state_callback(state)
+    node._state_callback(state)
 
-    hold = node._command_pub.publish.call_args.args[0]
-    assert hold.mode == ArmCommand.MODE_GRIPPER
-    assert hold.gripper_position == pytest.approx(0.32)
+    node._command_pub.publish.assert_not_called()
     assert node._target.gripper == pytest.approx(0.32)
+
+    node._axes[1] = 1.0
+    node._last_tick = time.monotonic() - 0.1
+    node._control_tick()
+    node._command_pub.publish.assert_not_called()
+
+    state.state = ArmState.STATE_SUCCEEDED
+    state.sequence_id = stop.sequence_id
+    node._state_callback(state)
+    node._last_tick = time.monotonic() - 0.1
+    node._control_tick()
+    moved = node._command_pub.publish.call_args.args[0]
+    assert moved.mode == ArmCommand.MODE_END_EFFECTOR
     node.destroy_node()
     rclpy.shutdown()
 

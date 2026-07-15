@@ -59,7 +59,7 @@ STOP
 命令头统一为：
 
 ```text
-byte 0       = tag: 'A' / 'P' / 'S'
+byte 0       = tag: 'A' / 'P' / 'H' / 'S'
 byte 1       = protocol_version: uint8, fixed 2
 byte 2..5    = wire_command_id: uint32 little-endian
 byte 6..7    = duration_ms: uint16 little-endian; motion range 1..30000,
@@ -85,9 +85,21 @@ SERVO ('P'):
   byte 8       = servo_id, uint8, range 1..6
   byte 12..15  = position_raw, float32 little-endian
 
+SERVO_HALT ('H'):
+  byte 8       = servo_id, uint8, range 1..6
+  duration_ms fixed 0; remaining payload bytes fixed 0
+
 STOP ('S'):
   no payload
 ```
+
+`H` 只停止指定舵机当前运动，不改变其他舵机；`S` 仍是停止全部舵机的全局安全
+命令。两者不得复用同一标签，避免旧固件把单舵机停止误解释为全局停止。`H` 是可
+抢占命令：主机必须取消被它替代的活动 `P`，立即发送新的 `wire_command_id`，并忽略
+旧 `P` 的迟到状态；若 `A` 仍在活动，主机必须先等待其生命周期结束再发送 `H`。
+固件成功发出舵机 `MOVE_STOP` 后直接返回 `COMPLETED`；这表示
+停止帧已发送完成，不表示已经通过位置反馈确认舵机静止。旧 v2 固件收到未知 `H`
+必须返回 `FAILED/BAD_COMMAND`，不得执行全局停止。
 
 状态包布局：
 
@@ -125,6 +137,7 @@ uint8 MODE_STOP=0
 uint8 MODE_END_EFFECTOR=1
 uint8 MODE_JOINT=2
 uint8 MODE_GRIPPER=3
+uint8 MODE_GRIPPER_STOP=4
 
 std_msgs/Header header
 uint8 mode
@@ -145,7 +158,12 @@ uint32 sequence_id
 - `MODE_JOINT`：使用 `joint_position`，单位 rad；
 - `MODE_GRIPPER`：使用 `gripper_position`，规范范围 `[0, 1]`，其中
   `0` 表示完全张开、`1` 表示完全闭合；
-- `duration_sec`：期望执行时间，必须为有限正数并限制在配置范围内；
+- `MODE_GRIPPER_STOP`：忽略位置和时长，只停止映射到 `gripper` 的舵机当前运动；
+  它必须抢占未完成的 `MODE_GRIPPER`，但不能替代 `MODE_STOP` 的整臂安全停止；
+  若停止帧在有界重试后仍写入失败，控制节点进入独立的锁存错误
+  `ERR_GRIPPER_STOP_WRITE (0x001A)`，必须执行错误复位和 Home 后才能恢复遥控；
+- `duration_sec`：目标运动模式的期望执行时间，必须为有限正数并限制在配置范围内；
+  `MODE_STOP` 和 `MODE_GRIPPER_STOP` 忽略该字段；
 - `sequence_id`：调用方生成的递增编号，用于关联命令和状态。
 
 未被当前 `mode` 使用的字段必须被控制节点忽略。所有模式在写入硬件前都必须经过范围、有限值和软限位检查。

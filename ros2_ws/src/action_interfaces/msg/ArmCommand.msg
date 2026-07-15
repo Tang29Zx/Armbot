@@ -5,6 +5,7 @@ uint8 MODE_STOP=0
 uint8 MODE_END_EFFECTOR=1
 uint8 MODE_JOINT=2
 uint8 MODE_GRIPPER=3
+uint8 MODE_GRIPPER_STOP=4
 
 std_msgs/Header header
 
@@ -22,7 +23,8 @@ float32[5] joint_position
 # MODE_GRIPPER uses gripper_position; 0=open, 1=closed.
 float32 gripper_position
 
-# Expected execution time (seconds). Must be finite positive and within config range.
+# Expected execution time for target-motion modes (seconds).
+# Ignored by MODE_STOP and MODE_GRIPPER_STOP.
 float32 duration_sec
 
 # Caller-generated monotonically increasing id to correlate command/state/error.

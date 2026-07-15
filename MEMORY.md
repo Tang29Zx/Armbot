@@ -17,6 +17,9 @@
   `(15, 0, 2) cm`，复位舵机值反解的末端 pitch 约为 `-54.48 deg`。
 - 夹爪规范值固定为 `0=open`、`1=closed`；STM32 理论范围为
   `raw 200=open`、`raw 700=closed`，开机复位值 `raw 226` 接近全开。
+- I2C v2 使用独立 `H` 标签停止指定舵机当前运动：byte 8 为 servo id；ROS
+  `MODE_GRIPPER_STOP=4` 用它停止夹爪。`H` 可抢占活动夹爪 `P`，但不能丢弃活动 ARM；
+  全局 `S` 仍停止全部舵机。旧 v2 固件应把未知 `H` 安全拒绝为 `BAD_COMMAND`。
 
 ## Xbox 手柄映射
 

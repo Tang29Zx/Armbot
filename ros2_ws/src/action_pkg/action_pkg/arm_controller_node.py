@@ -58,6 +58,7 @@ FW_ERROR_MOTION_TIMEOUT = 7
 
 # I2C command byte tags (must match STM32 firmware; contract sec 2.3)
 TAG_ARM = ord('A')
+TAG_SERVO_STOP = ord('H')
 TAG_SERVO = ord('P')
 TAG_STOP = ord('S')
 
@@ -78,6 +79,7 @@ ERR_CMD_TIMEOUT = 0x0016
 ERR_STALE_CMD = 0x0017
 ERR_FW_PROTOCOL = 0x0018
 ERR_FW_RESTARTED = 0x0019
+ERR_GRIPPER_STOP_WRITE = 0x001A
 
 # Firmware-reported errors (distinct from node-side validation errors).
 ERR_FW_NO_SOLVE = 0x0020
@@ -134,7 +136,12 @@ def _legacy_status_text(lifecycle, error):
 
 
 def _motion_mode_tag(mode):
-    return 'A' if mode == ArmCommand.MODE_END_EFFECTOR else 'P'
+    tags = {
+        ArmCommand.MODE_END_EFFECTOR: 'A',
+        ArmCommand.MODE_GRIPPER: 'P',
+        ArmCommand.MODE_GRIPPER_STOP: 'H',
+    }
+    return tags.get(mode, '?')
 
 
 # I2C failures before we latch into STATE_ERROR (contract sec 5.5)
@@ -367,6 +374,10 @@ class ArmControllerNode(Node):
             self._accept_motion(cmd)
             return
 
+        if cmd.mode == ArmCommand.MODE_GRIPPER_STOP:
+            self._accept_gripper_stop(cmd)
+            return
+
         self._set_error(ERR_UNKNOWN_MODE, 'unknown mode %d (seq=%d)' % (cmd.mode, seq))
 
     def _accept_motion(self, cmd):
@@ -406,10 +417,38 @@ class ArmControllerNode(Node):
                    _motion_mode_tag(cmd.mode), seq))
         self._dispatch_motion(cmd)
 
+    def _accept_gripper_stop(self, cmd):
+        # A gripper halt must preempt an in-flight gripper position command;
+        # queueing it behind that unreachable target defeats the halt. Never
+        # abandon an active ARM lifecycle, because the firmware exposes only
+        # one current wire id and the arm may still be moving physically.
+        if (self._active_wire_id != 0
+                and self._active_mode == ArmCommand.MODE_END_EFFECTOR):
+            self._accept_motion(cmd)
+            return
+
+        seq = int(cmd.sequence_id)
+        if seq > 0:
+            self._last_applied_seq = seq
+        self._queued_command = None
+        if self._dispatch_motion(cmd):
+            return
+
+        # The halt is safety-critical: after all bounded I2C retries fail,
+        # never leave teleop waiting for an acknowledgement that cannot exist.
+        self._clear_active_motion()
+        self._last_sequence_id = seq
+        if self._error_code != ERR_GRIPPER_UNMAPPED:
+            self._set_error(
+                ERR_GRIPPER_STOP_WRITE,
+                'gripper stop I2C write failed after retries (seq=%d)' % seq)
+
     def _dispatch_motion(self, cmd):
         wire_id = self._take_wire_id()
         if cmd.mode == ArmCommand.MODE_END_EFFECTOR:
             sent = self._send_end_effector(cmd, wire_id)
+        elif cmd.mode == ArmCommand.MODE_GRIPPER_STOP:
+            sent = self._send_gripper_stop(cmd, wire_id)
         else:
             sent = self._send_gripper(cmd, wire_id)
         if not sent:
@@ -537,6 +576,18 @@ class ArmControllerNode(Node):
             buf, TAG_SERVO, wire_id, self._duration_ms(duration))
         buf[8] = sid & 0xFF
         struct.pack_into('<f', buf, 12, raw)
+        return self._i2c_write(buf)
+
+    def _send_gripper_stop(self, cmd, wire_id):
+        sid = self._servo_id_for('gripper')
+        if sid is None:
+            self._set_error(ERR_GRIPPER_UNMAPPED,
+                            'gripper servo id not in servo_id_map (seq=%d)'
+                            % cmd.sequence_id)
+            return False
+        buf = bytearray(CMD_PACKET_SIZE)
+        self._pack_command_header(buf, TAG_SERVO_STOP, wire_id, 0)
+        buf[8] = sid & 0xFF
         return self._i2c_write(buf)
 
     def _servo_id_for(self, joint_name):
@@ -737,7 +788,8 @@ class ArmControllerNode(Node):
                     ERR_FW_RESTARTED,
                     'firmware restarted; reset error and run home again')
             elif (not self._firmware_restart_latched
-                  and not self._estop_latched):
+                  and not self._estop_latched
+                  and self._error_code == 0):
                 self._set_state(ArmState.STATE_IDLE)
             return
 

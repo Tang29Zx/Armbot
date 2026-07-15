@@ -25,8 +25,10 @@ from action_pkg.arm_controller_node import (
     ERR_FW_NO_SOLVE,
     ERR_FW_PROTOCOL,
     ERR_FW_RESTARTED,
+    ERR_GRIPPER_STOP_WRITE,
     ERR_FW_SERVO_FEEDBACK,
     ERR_GRIPPER_RANGE,
+    ERR_GRIPPER_UNMAPPED,
     ERR_I2C_LOST,
     ERR_JOINT_DISABLED,
     ERR_NONFINITE_FIELD,
@@ -195,6 +197,130 @@ def test_gripper_command_does_not_replace_feedback(node):
     ))
 
     assert node._gripper_position == pytest.approx(0.25)
+
+
+def test_gripper_stop_preempts_position_and_ignores_old_completion(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER,
+        seq=1,
+        gripper_position=0.8,
+        duration_sec=0.09,
+    ))
+    old_wire_id = node._active_wire_id
+
+    node.handle_command(_cmd(ArmCommand.MODE_GRIPPER_STOP, seq=2))
+    stop_wire_id = node._active_wire_id
+
+    assert [packet[0] for packet in writes] == [ord('P'), ord('H')]
+    assert writes[-1][1] == I2C_PROTOCOL_VERSION
+    assert struct.unpack_from('<I', writes[-1], 2)[0] == stop_wire_id
+    assert struct.unpack_from('<H', writes[-1], 6)[0] == 0
+    assert writes[-1][8] == 1
+    assert writes[-1][9:] == bytes(23)
+    assert node._active_seq == 2
+    assert node._queued_command is None
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_COMPLETED, old_wire_id)
+    node.poll_status()
+    assert node._state == ArmState.STATE_MOVING
+    assert node._active_wire_id == stop_wire_id
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_COMPLETED, stop_wire_id)
+    node.poll_status()
+    assert node._state == ArmState.STATE_SUCCEEDED
+    assert node._last_sequence_id == 2
+
+
+def test_gripper_stop_waits_for_active_arm_completion(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    node.handle_command(_cmd(
+        ArmCommand.MODE_END_EFFECTOR,
+        seq=1,
+        x=15.0,
+        y=0.0,
+        z=2.0,
+        pitch=-54.48,
+        duration_sec=0.09,
+    ))
+    arm_wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_ACCEPTED, arm_wire_id)
+    node.poll_status()
+
+    node.handle_command(_cmd(ArmCommand.MODE_GRIPPER_STOP, seq=2))
+
+    assert [packet[0] for packet in writes] == [ord('A')]
+    assert node._queued_command.mode == ArmCommand.MODE_GRIPPER_STOP
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_COMPLETED, arm_wire_id)
+    node.poll_status()
+
+    assert [packet[0] for packet in writes] == [ord('A'), ord('H')]
+    assert node._active_seq == 2
+
+
+def test_failed_gripper_stop_write_enters_error(node):
+    writes = []
+
+    def write(data):
+        writes.append(bytes(data))
+        return len(writes) == 1
+
+    node._i2c_write = write
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER,
+        seq=1,
+        gripper_position=0.8,
+        duration_sec=0.09,
+    ))
+    old_wire_id = node._active_wire_id
+
+    node.handle_command(_cmd(ArmCommand.MODE_GRIPPER_STOP, seq=2))
+
+    assert [packet[0] for packet in writes] == [ord('P'), ord('H')]
+    assert old_wire_id != 0
+    assert node._active_wire_id == 0
+    assert node._state == ArmState.STATE_ERROR
+    assert node._error_code == ERR_GRIPPER_STOP_WRITE
+    assert node._last_sequence_id == 2
+
+    node._i2c_read_status = lambda: _status(FW_LIFECYCLE_READY)
+    node.poll_status()
+
+    assert node._state == ArmState.STATE_ERROR
+    assert node._error_code == ERR_GRIPPER_STOP_WRITE
+
+
+def test_unmapped_gripper_stop_keeps_mapping_error(node):
+    node.set_parameters([Parameter(
+        'servo_id_map', Parameter.Type.STRING_ARRAY,
+        ['joint_1_base:6', 'joint_2_shoulder:5', 'joint_3_elbow:4',
+         'joint_4_wrist_pitch:3', 'joint_5_wrist_roll:2'],
+    )])
+
+    node.handle_command(_cmd(ArmCommand.MODE_GRIPPER_STOP, seq=1))
+
+    assert node._state == ArmState.STATE_ERROR
+    assert node._error_code == ERR_GRIPPER_UNMAPPED
+    assert node._active_wire_id == 0
+
+
+def test_global_stop_packet_remains_payload_free(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+
+    node.handle_command(_cmd(ArmCommand.MODE_STOP, seq=1))
+
+    assert writes[-1][0] == ord('S')
+    assert writes[-1][1] == I2C_PROTOCOL_VERSION
+    assert writes[-1][8:] == bytes(24)
 
 
 def test_real_gripper_and_home_joint_feedback(node):
