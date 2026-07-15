@@ -7,8 +7,8 @@ arm_teleop_node:
     deadzone: 0.12
     trigger_deadzone: 0.05
 
-    translation_speed_cm_sec: 1.0
-    pitch_speed_deg_sec: 10.0
+    translation_speed_cm_sec: 1.5
+    pitch_speed_deg_sec: 15.0
     gripper_speed_sec: 0.5
     gripper_contact_min_progress: 0.02
     gripper_contact_min_gap: 0.04
