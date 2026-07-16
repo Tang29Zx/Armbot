@@ -16,6 +16,7 @@ Deprecated compatibility layer (routes through the SAME safety path):
 Only this node owns the target I2C address (contract sec 5.2).
 """
 
+import copy
 import math
 import struct
 import time
@@ -35,13 +36,29 @@ except ImportError:  # pragma: no cover - runtime dep, keep node importable for 
 
 
 CMD_PACKET_SIZE = 32
-# Status packet is now 32 bytes: byte0..7 = text status code, byte8..31 =
-# float32[6] real servo raw positions (see STM32 main.c I2C_JOINT_POS_OFFSET).
 STATUS_PACKET_SIZE = 32
 I2C_JOINT_COUNT = 6
+I2C_PROTOCOL_MAGIC = 0xA5
+I2C_PROTOCOL_VERSION = 2
+
+FW_LIFECYCLE_READY = 0
+FW_LIFECYCLE_ACCEPTED = 1
+FW_LIFECYCLE_EXECUTING = 2
+FW_LIFECYCLE_COMPLETED = 3
+FW_LIFECYCLE_FAILED = 4
+
+FW_ERROR_NONE = 0
+FW_ERROR_BAD_PROTOCOL = 1
+FW_ERROR_BAD_COMMAND = 2
+FW_ERROR_ARM_NOT_READY = 3
+FW_ERROR_NO_IK_SOLUTION = 4
+FW_ERROR_SERVO_WRITE_FAILED = 5
+FW_ERROR_SERVO_FEEDBACK_FAILED = 6
+FW_ERROR_MOTION_TIMEOUT = 7
 
 # I2C command byte tags (must match STM32 firmware; contract sec 2.3)
 TAG_ARM = ord('A')
+TAG_SERVO_STOP = ord('H')
 TAG_SERVO = ord('P')
 TAG_STOP = ord('S')
 
@@ -60,49 +77,71 @@ ERR_GRIPPER_UNMAPPED = 0x0015
 # Command lifecycle (contract sec 5.3 / command_timeout_sec)
 ERR_CMD_TIMEOUT = 0x0016
 ERR_STALE_CMD = 0x0017
+ERR_FW_PROTOCOL = 0x0018
+ERR_FW_RESTARTED = 0x0019
+ERR_GRIPPER_STOP_WRITE = 0x001A
 
-# Firmware status codes returned in the 8-byte I2C status packet (main.c).
-FW_STATUS_STM32_OK = 'STM32_OK'
-FW_STATUS_ARM_RDY = 'ARM_RDY_'
-FW_STATUS_ARM_OK = 'ARM_OK__'
-FW_STATUS_SVO_OK = 'SVO_OK__'
-FW_STATUS_STOP_OK = 'STOP_OK_'
-FW_STATUS_NO_SOLVE = 'NO_SOLVE'
-FW_STATUS_ARM_ERR = 'ARM_ERR_'
-FW_STATUS_BAD_CMD = 'BAD_CMD_'
-FW_STATUS_ARM_DONE = 'ARM_DONE'
-
-# Firmware-reported error codes (distinct from node-side validation codes).
+# Firmware-reported errors (distinct from node-side validation errors).
 ERR_FW_NO_SOLVE = 0x0020
 ERR_FW_NOT_READY = 0x0021
 ERR_FW_BAD_CMD = 0x0022
+ERR_FW_SERVO_WRITE = 0x0023
+ERR_FW_SERVO_FEEDBACK = 0x0024
+ERR_FW_MOTION_TIMEOUT = 0x0025
 
 
-def _decode_firmware_status(code):
-    """
-    Map an 8-char firmware status code to (ArmState, error_code, message).
+def _decode_firmware_packet(data):
+    """Return (lifecycle, error, wire_id) for a valid v2 status packet."""
+    raw = bytes(data)
+    if (len(raw) != STATUS_PACKET_SIZE
+            or raw[0] != I2C_PROTOCOL_MAGIC
+            or raw[1] != I2C_PROTOCOL_VERSION
+            or raw[2] > FW_LIFECYCLE_FAILED
+            or raw[3] > FW_ERROR_MOTION_TIMEOUT):
+        return None
+    return raw[2], raw[3], struct.unpack_from('<I', raw, 4)[0]
 
-    Returns (None, 0, '') for unrecognized codes (leave node state as-is).
-    'ARM_OK__'/'SVO_OK__' mean the command was accepted and motion started
-    (NOT that it finished). 'ARM_DONE' means all tracked servos have reached
-    their targets (completion signal; firmware reports it after the motion).
-    """
-    if code in (FW_STATUS_ARM_OK, FW_STATUS_SVO_OK):
-        return (ArmState.STATE_MOVING, 0, '')
-    if code == FW_STATUS_ARM_DONE:
-        return (ArmState.STATE_SUCCEEDED, 0, 'firmware: motion completed')
-    if code in (FW_STATUS_STOP_OK, FW_STATUS_STM32_OK, FW_STATUS_ARM_RDY):
-        return (ArmState.STATE_IDLE, 0, '')
-    if code == FW_STATUS_NO_SOLVE:
-        return (ArmState.STATE_ERROR, ERR_FW_NO_SOLVE,
-                'firmware: inverse kinematics has no solution')
-    if code == FW_STATUS_ARM_ERR:
-        return (ArmState.STATE_ERROR, ERR_FW_NOT_READY,
-                'firmware: arm not ready (robot_arm_ready==0)')
-    if code == FW_STATUS_BAD_CMD:
-        return (ArmState.STATE_ERROR, ERR_FW_BAD_CMD,
-                'firmware: unknown/bad I2C command byte')
-    return (None, 0, '')
+
+def _firmware_error_details(error):
+    details = {
+        FW_ERROR_BAD_PROTOCOL: (
+            ERR_FW_PROTOCOL, 'firmware: bad I2C protocol version'),
+        FW_ERROR_BAD_COMMAND: (
+            ERR_FW_BAD_CMD, 'firmware: invalid command or payload'),
+        FW_ERROR_ARM_NOT_READY: (
+            ERR_FW_NOT_READY, 'firmware: arm is not ready'),
+        FW_ERROR_NO_IK_SOLUTION: (
+            ERR_FW_NO_SOLVE, 'firmware: inverse kinematics has no solution'),
+        FW_ERROR_SERVO_WRITE_FAILED: (
+            ERR_FW_SERVO_WRITE, 'firmware: servo UART write failed'),
+        FW_ERROR_SERVO_FEEDBACK_FAILED: (
+            ERR_FW_SERVO_FEEDBACK, 'firmware: target servo feedback failed'),
+        FW_ERROR_MOTION_TIMEOUT: (
+            ERR_FW_MOTION_TIMEOUT, 'firmware: motion timed out'),
+    }
+    return details.get(
+        error, (ERR_FW_BAD_CMD, 'firmware: unknown error %d' % error))
+
+
+def _legacy_status_text(lifecycle, error):
+    if lifecycle == FW_LIFECYCLE_READY:
+        return 'ARM_RDY_'
+    if lifecycle in (FW_LIFECYCLE_ACCEPTED, FW_LIFECYCLE_EXECUTING):
+        return 'ARM_OK__'
+    if lifecycle == FW_LIFECYCLE_COMPLETED:
+        return 'ARM_DONE'
+    if error == FW_ERROR_NO_IK_SOLUTION:
+        return 'NO_SOLVE'
+    return 'ARM_ERR_'
+
+
+def _motion_mode_tag(mode):
+    tags = {
+        ArmCommand.MODE_END_EFFECTOR: 'A',
+        ArmCommand.MODE_GRIPPER: 'P',
+        ArmCommand.MODE_GRIPPER_STOP: 'H',
+    }
+    return tags.get(mode, '?')
 
 
 # I2C failures before we latch into STATE_ERROR (contract sec 5.5)
@@ -134,16 +173,24 @@ class ArmControllerNode(Node):
         # --- I2C failure tracking (contract sec 5.5) ---
         self._i2c_fail_count = 0
 
-        # --- last decoded firmware status (for change detection) ---
-        self._last_firmware_status = ''
+        # --- firmware protocol / restart detection ---
+        self._firmware_protocol_ok = False
+        self._firmware_seen_nonzero_id = False
+        self._firmware_restart_latched = False
         self._last_logged_raw = ''
 
         # --- command lifecycle / watchdog (contract sec 5.3) ---
         self._pending_motion = False      # a motion command is awaiting firmware ack
         self._pending_seq = 0
+        self._pending_wire_id = 0
         self._pending_sent_ns = 0
-        self._last_fw_contact_ns = 0      # last time a recognized firmware status was read
-        # Highest sequence_id actually executed, used for stale/duplicate checks.
+        self._active_wire_id = 0
+        self._active_seq = 0
+        self._active_mode = None
+        self._wire_id_counter = 0
+        self._queued_command = None
+        self._last_fw_contact_ns = 0      # any successfully read status packet
+        # Highest nonzero sequence_id accepted, used for stale/duplicate checks.
         self._last_applied_seq = 0
 
         # --- publishers ---
@@ -175,7 +222,7 @@ class ArmControllerNode(Node):
             'i2c_bus': 5,
             'i2c_address': 0x30,
             'command_timeout_sec': 1.0,
-            'min_duration_sec': 0.1,
+            'min_duration_sec': 0.05,
             'max_duration_sec': 30.0,
             'joint_names': [
                 'joint_1_base', 'joint_2_shoulder', 'joint_3_elbow',
@@ -261,12 +308,19 @@ class ArmControllerNode(Node):
     def _on_i2c_failure(self, op, exc):
         self._i2c_fail_count += 1
         self.i2c_ok = False
-        self._set_error(ERR_I2C_LOST,
-                        'I2C %s failed (seq=%d, fails=%d): %s'
-                        % (op, self._last_sequence_id, self._i2c_fail_count, exc))
-        if self._i2c_fail_count >= I2C_FAIL_THRESHOLD:
-            # stop sending motion commands (contract sec 5.5)
-            self.get_logger().error('I2C failure threshold reached -> STATE_ERROR, halting motion')
+        message = ('I2C %s failed (seq=%d, fails=%d): %s'
+                   % (op, self._last_sequence_id,
+                      self._i2c_fail_count, exc))
+        if self._i2c_fail_count < I2C_FAIL_THRESHOLD:
+            self.get_logger().warn(message)
+            return
+
+        # Link liveness is independent from command acknowledgement. A command
+        # can time out while reads still work, while repeated read/write errors
+        # stop all motion through this separate threshold.
+        self._position_valid = False
+        self._clear_active_motion()
+        self._set_error(ERR_I2C_LOST, message)
 
     # ===================== command entry points =====================
     def command_callback(self, msg):
@@ -290,8 +344,16 @@ class ArmControllerNode(Node):
             return
 
         if cmd.mode == ArmCommand.MODE_STOP:
-            self._last_applied_seq = seq
+            if seq > 0:
+                self._last_applied_seq = seq
             self._send_stop(seq)
+            return
+
+        if not self._firmware_protocol_ok:
+            self._set_error(
+                ERR_FW_PROTOCOL,
+                'firmware I2C v2 status not verified; motion rejected (seq=%d)'
+                % seq)
             return
 
         if cmd.mode == ArmCommand.MODE_JOINT:
@@ -303,29 +365,127 @@ class ArmControllerNode(Node):
         if cmd.mode == ArmCommand.MODE_END_EFFECTOR:
             if not self._validate_end_effector(cmd, seq):
                 return
-            if self._send_end_effector(cmd, seq):
-                self._last_applied_seq = seq
-                self._set_state(ArmState.STATE_MOVING, seq)
-                self._arm_pending_motion(seq)
+            self._accept_motion(cmd)
             return
 
         if cmd.mode == ArmCommand.MODE_GRIPPER:
             if not self._validate_gripper(cmd, seq):
                 return
-            if self._send_gripper(cmd, seq):
-                self._last_applied_seq = seq
-                # A gripper command is an immediate SERVO write; the firmware
-                # answers SVO_OK__ synchronously and never emits a distinct
-                # "done" transition. Do NOT arm the motion watchdog here: with
-                # repeated gripper commands the status string stays SVO_OK__
-                # (no transition), which would falsely trip ERR_CMD_TIMEOUT
-                # (0x0016) even though the servo executed. Mark success
-                # directly and clear any pending watchdog instead.
-                self._pending_motion = False
-                self._set_state(ArmState.STATE_SUCCEEDED, seq)
+            self._accept_motion(cmd)
+            return
+
+        if cmd.mode == ArmCommand.MODE_GRIPPER_STOP:
+            self._accept_gripper_stop(cmd)
             return
 
         self._set_error(ERR_UNKNOWN_MODE, 'unknown mode %d (seq=%d)' % (cmd.mode, seq))
+
+    def _accept_motion(self, cmd):
+        seq = int(cmd.sequence_id)
+        if seq > 0:
+            self._last_applied_seq = seq
+        blocked_by_ack = self._pending_motion
+        blocked_by_mode = (
+            self._active_wire_id != 0 and self._active_mode != cmd.mode)
+        if blocked_by_ack or blocked_by_mode:
+            previous = self._queued_command
+            self._queued_command = copy.deepcopy(cmd)
+            reason = 'awaiting_ack' if blocked_by_ack else 'active_mode'
+            if previous is None:
+                self.get_logger().debug(
+                    '[motion queue] queued mode=%s seq=%d reason=%s'
+                    % (_motion_mode_tag(cmd.mode), seq, reason))
+            else:
+                self.get_logger().debug(
+                    '[motion queue] replaced mode=%s seq=%d with mode=%s '
+                    'seq=%d reason=%s'
+                    % (_motion_mode_tag(previous.mode),
+                       int(previous.sequence_id),
+                       _motion_mode_tag(cmd.mode), seq, reason))
+            self._set_state(ArmState.STATE_MOVING, seq)
+            return
+
+        # A command that can run now is the newest operator intent. Do not let
+        # an older cross-mode command survive and replay after this one finishes.
+        if self._queued_command is not None:
+            previous = self._queued_command
+            self._queued_command = None
+            self.get_logger().debug(
+                '[motion queue] canceled mode=%s seq=%d by mode=%s seq=%d'
+                % (_motion_mode_tag(previous.mode),
+                   int(previous.sequence_id),
+                   _motion_mode_tag(cmd.mode), seq))
+        self._dispatch_motion(cmd)
+
+    def _accept_gripper_stop(self, cmd):
+        # A gripper halt must preempt an in-flight gripper position command;
+        # queueing it behind that unreachable target defeats the halt. Never
+        # abandon an active ARM lifecycle, because the firmware exposes only
+        # one current wire id and the arm may still be moving physically.
+        if (self._active_wire_id != 0
+                and self._active_mode == ArmCommand.MODE_END_EFFECTOR):
+            self._accept_motion(cmd)
+            return
+
+        seq = int(cmd.sequence_id)
+        if seq > 0:
+            self._last_applied_seq = seq
+        self._queued_command = None
+        if self._dispatch_motion(cmd):
+            return
+
+        # The halt is safety-critical: after all bounded I2C retries fail,
+        # never leave teleop waiting for an acknowledgement that cannot exist.
+        self._clear_active_motion()
+        self._last_sequence_id = seq
+        if self._error_code != ERR_GRIPPER_UNMAPPED:
+            self._set_error(
+                ERR_GRIPPER_STOP_WRITE,
+                'gripper stop I2C write failed after retries (seq=%d)' % seq)
+
+    def _dispatch_motion(self, cmd):
+        wire_id = self._take_wire_id()
+        if cmd.mode == ArmCommand.MODE_END_EFFECTOR:
+            sent = self._send_end_effector(cmd, wire_id)
+        elif cmd.mode == ArmCommand.MODE_GRIPPER_STOP:
+            sent = self._send_gripper_stop(cmd, wire_id)
+        else:
+            sent = self._send_gripper(cmd, wire_id)
+        if not sent:
+            return False
+        seq = int(cmd.sequence_id)
+        self._active_wire_id = wire_id
+        self._active_seq = seq
+        self._active_mode = cmd.mode
+        self._set_state(ArmState.STATE_MOVING, seq)
+        self._arm_pending_motion(seq, wire_id)
+        self.get_logger().debug(
+            '[motion dispatch] mode=%s seq=%d wire_id=%d'
+            % (_motion_mode_tag(cmd.mode), seq, wire_id))
+        return True
+
+    def _flush_queued_command(self):
+        if self._queued_command is None or self._pending_motion:
+            return
+        if (self._active_wire_id != 0
+                and self._active_mode != self._queued_command.mode):
+            return
+        cmd = self._queued_command
+        self._queued_command = None
+        self._dispatch_motion(cmd)
+
+    def _clear_active_motion(self, clear_queue=True):
+        self._pending_motion = False
+        self._active_wire_id = 0
+        self._active_mode = None
+        if clear_queue:
+            self._queued_command = None
+
+    def _take_wire_id(self):
+        self._wire_id_counter = (self._wire_id_counter + 1) & 0xFFFFFFFF
+        if self._wire_id_counter == 0:
+            self._wire_id_counter = 1
+        return self._wire_id_counter
 
     # ===================== validation (contract sec 5.3) =====================
     def _validate_end_effector(self, cmd, seq):
@@ -362,62 +522,73 @@ class ArmControllerNode(Node):
 
     # ===================== I2C packet builders (sec 2.3 layout) =====================
     def _send_stop(self, seq):
+        wire_id = self._take_wire_id()
         buf = bytearray(CMD_PACKET_SIZE)
-        buf[0] = TAG_STOP
+        self._pack_command_header(buf, TAG_STOP, wire_id, 0)
         self._i2c_write(buf)
+        self._clear_active_motion()
         # A STOP command must never make a latched emergency stop look cleared.
         state = ArmState.STATE_ESTOP if self._estop_latched else ArmState.STATE_IDLE
         self._set_state(state, seq)
 
-    def _send_end_effector(self, cmd, seq):
+    def _pack_command_header(self, buf, tag, wire_id, duration_ms):
+        buf[0] = tag
+        buf[1] = I2C_PROTOCOL_VERSION
+        struct.pack_into('<I', buf, 2, wire_id)
+        struct.pack_into('<H', buf, 6, duration_ms)
+
+    def _duration_ms(self, duration_sec):
+        return max(1, min(30000, int(round(duration_sec * 1000.0))))
+
+    def _send_end_effector(self, cmd, wire_id):
         buf = bytearray(CMD_PACKET_SIZE)
-        buf[0] = TAG_ARM
-        struct.pack_into('<f', buf, 4, cmd.x)
-        struct.pack_into('<f', buf, 8, cmd.y)
-        struct.pack_into('<f', buf, 12, cmd.z)
-        struct.pack_into('<f', buf, 16, cmd.pitch)
+        self._pack_command_header(
+            buf, TAG_ARM, wire_id, self._duration_ms(cmd.duration_sec))
+        struct.pack_into('<f', buf, 8, cmd.x)
+        struct.pack_into('<f', buf, 12, cmd.y)
+        struct.pack_into('<f', buf, 16, cmd.z)
+        struct.pack_into('<f', buf, 20, cmd.pitch)
         # min/max pitch form the IK's allowed end-effector roll window
         # (firmware calls set_pitch_range(min,max) inside robot_arm_coordinate_set).
         # They are NOT part of ArmCommand, so we take them from config. The
         # reference firmware examples use [-90, 90]; do NOT set both to cmd.pitch
         # (i.e. a degenerate [0,0] window) or the IK is over-constrained and
         # returns NO_SOLVE even for reachable points.
-        struct.pack_into('<f', buf, 20, self._cfg('pitch_min_deg'))
-        struct.pack_into('<f', buf, 24, self._cfg('pitch_max_deg'))
-        # Firmware forwards byte28 to serial_servo_set_position(), whose 'duration'
-        # argument is uint16 in MILLISECONDS (Lobot MOVE_TIME_WRITE frame, see
-        # serial_servo.c). ArmCommand.duration_sec is in seconds, so convert to ms
-        # and clamp to uint16 range (max ~65.535 s) to avoid truncation on the
-        # firmware side.
-        dur_ms = max(0, min(0xFFFF, int(round(cmd.duration_sec * 1000.0))))
-        struct.pack_into('<I', buf, 28, dur_ms)
+        struct.pack_into('<f', buf, 24, self._cfg('pitch_min_deg'))
+        struct.pack_into('<f', buf, 28, self._cfg('pitch_max_deg'))
         return self._i2c_write(buf)
 
-    def _send_gripper(self, cmd, seq):
+    def _send_gripper(self, cmd, wire_id):
         sid = self._servo_id_for('gripper')
         if sid is None:
             self._set_error(ERR_GRIPPER_UNMAPPED,
-                            'gripper servo id not in servo_id_map (seq=%d)' % seq)
+                            'gripper servo id not in servo_id_map (seq=%d)'
+                            % cmd.sequence_id)
             return False
         opened = float(self._cfg('gripper_open_raw'))
         closed = float(self._cfg('gripper_closed_raw'))
         raw = opened + cmd.gripper_position * (closed - opened)
         buf = bytearray(CMD_PACKET_SIZE)
-        buf[0] = TAG_SERVO
-        buf[4] = sid & 0xFF
-        struct.pack_into('<f', buf, 8, raw)
-        # P packet byte12..15 carries move time in milliseconds. Keep one
-        # second as the compatibility default for legacy callers that leave
-        # duration_sec at its zero-initialized value.
         duration = (cmd.duration_sec
                     if math.isfinite(cmd.duration_sec) and cmd.duration_sec > 0
                     else 1.0)
-        dur_ms = max(1, min(0xFFFF, int(round(duration * 1000.0))))
-        struct.pack_into('<I', buf, 12, dur_ms)
-        ok = self._i2c_write(buf)
-        if ok:
-            self._gripper_position = cmd.gripper_position
-        return ok
+        self._pack_command_header(
+            buf, TAG_SERVO, wire_id, self._duration_ms(duration))
+        buf[8] = sid & 0xFF
+        struct.pack_into('<f', buf, 12, raw)
+        return self._i2c_write(buf)
+
+    def _send_gripper_stop(self, cmd, wire_id):
+        sid = self._servo_id_for('gripper')
+        if sid is None:
+            self._set_error(ERR_GRIPPER_UNMAPPED,
+                            'gripper servo id not in servo_id_map (seq=%d)'
+                            % cmd.sequence_id)
+            return False
+        buf = bytearray(CMD_PACKET_SIZE)
+        self._pack_command_header(buf, TAG_SERVO_STOP, wire_id, 0)
+        buf[8] = sid & 0xFF
+        return self._i2c_write(buf)
 
     def _servo_id_for(self, joint_name):
         for entry in self._cfg('servo_id_map'):
@@ -443,6 +614,14 @@ class ArmControllerNode(Node):
         self.get_logger().error('[seq=%d] err=0x%04X %s'
                                 % (self._last_sequence_id, code, message))
 
+    def _set_recoverable_rejection(self, code, message):
+        """Report a rejected target without latching the controller in ERROR."""
+        self._state = ArmState.STATE_IDLE
+        self._error_code = code
+        self._error_message = message
+        self.get_logger().warn('[seq=%d] err=0x%04X %s'
+                               % (self._last_sequence_id, code, message))
+
     def _set_state(self, state, seq=None):
         if seq is None:
             seq = self._last_sequence_id
@@ -456,27 +635,27 @@ class ArmControllerNode(Node):
         self._state = state
 
     # ===================== command watchdog (sec 5.3) =====================
-    def _arm_pending_motion(self, seq):
+    def _arm_pending_motion(self, seq, wire_id):
         self._pending_motion = True
         self._pending_seq = seq
+        self._pending_wire_id = wire_id
         self._pending_sent_ns = self.get_clock().now().nanoseconds
-        # Start the firmware-contact clock at send time so a *silent* firmware
-        # is only detected after the full timeout, never instantly at startup.
-        self._last_fw_contact_ns = self._pending_sent_ns
 
     def _check_command_timeout(self):
-        # contract sec 5.3 / command_timeout_sec: a motion command that never
-        # receives any recognized firmware status within the timeout is a fault.
+        # A readable packet for another command proves liveness but is not an
+        # acknowledgement. Only a matching wire_command_id stops this timer.
         if not self._pending_motion or self._estop_latched:
             return
         now_ns = self.get_clock().now().nanoseconds
         timeout_ns = int(self._cfg('command_timeout_sec') * 1e9)
-        if now_ns - self._last_fw_contact_ns > timeout_ns:
-            self._pending_motion = False
+        if now_ns - self._pending_sent_ns > timeout_ns:
+            self._clear_active_motion()
             self._set_error(
                 ERR_CMD_TIMEOUT,
-                'no firmware status within %.2fs of command (seq=%d)'
-                % (self._cfg('command_timeout_sec'), self._pending_seq))
+                'no matching firmware ack within %.2fs '
+                '(seq=%d, wire_id=%d)'
+                % (self._cfg('command_timeout_sec'), self._pending_seq,
+                   self._pending_wire_id))
 
     # ===================== publishers =====================
     def publish_state(self):
@@ -493,10 +672,9 @@ class ArmControllerNode(Node):
         msg.error_message = self._error_message
         self.state_pub.publish(msg)
 
-        if self._cfg('joint_feedback_enabled'):
+        if self._cfg('joint_feedback_enabled') and self._position_valid:
             self._publish_joint_states()
-        # When disabled we do NOT publish /joint_states (contract sec 5.7:
-        # never forge joint positions when feedback is unverified).
+        # Never publish /joint_states when feedback is disabled or unverified.
 
     def _update_joint_feedback(self, data):
         """
@@ -514,6 +692,7 @@ class ArmControllerNode(Node):
         zeros = self._cfg('joint_zero_offsets')
         dirs = self._cfg('joint_directions')
         rad_per_raw = math.pi * 240.0 / 180.0 / 1000.0  # Lobot: 0..1000 -> 0..240 deg
+        arm_raw_positions = []
         ji = 0
         for entry in self._cfg('servo_id_map'):
             if ':' not in entry:
@@ -525,6 +704,7 @@ class ArmControllerNode(Node):
             sid = int(sid_s)
             if 1 <= sid <= len(self._servo_raw_positions):
                 pos = self._servo_raw_positions[sid - 1]
+                arm_raw_positions.append(pos)
                 self._joint_position[ji] = dirs[ji] * (pos - 500.0) * rad_per_raw + zeros[ji]
             ji += 1
         # Servo id 1 is the gripper. Its canonical contract is 0=open,
@@ -535,7 +715,12 @@ class ArmControllerNode(Node):
         if abs(span) > 1e-9:
             actual = (self._servo_raw_positions[0] - opened) / span
             self._gripper_position = max(0.0, min(1.0, actual))
-        self._position_valid = True
+        expected_joint_count = len(self._cfg('joint_names'))
+        self._position_valid = (
+            len(arm_raw_positions) == expected_joint_count
+            and all(math.isfinite(pos) and 0.0 < pos <= 1000.0
+                    for pos in arm_raw_positions)
+        )
 
     def _publish_joint_states(self):
         js = JointState()
@@ -566,79 +751,102 @@ class ArmControllerNode(Node):
         self.joint_state_pub.publish(js)
 
     def poll_status(self):
-        # Watchdog runs on every poll, before the estop / transition guards,
-        # so a silent firmware is still detected while estopped or idle.
         self._check_command_timeout()
 
         data = self._i2c_read_status()
         if data is None:
             return
-        # Continuously decode real servo positions from the 32-byte status
-        # packet and refresh ArmState.joint_position / position_valid. This runs
-        # on every poll, independent of the status-code transition logic below,
-        # so /joint_states reflects live hardware even when idle.
-        self._update_joint_feedback(data)
-        status_str = bytes(data[:8]).decode('utf-8', errors='ignore').rstrip('\x00')
-        # Diagnostic: log the raw 8-byte status (including recognized codes) on
-        # every change, so a silent/non-ACKing firmware is visible during debug.
-        if status_str != self._last_logged_raw:
-            self.get_logger().info(
-                '[raw firmware status] %r '
-                '(servo1_raw=%.1f, servo6_base_raw=%.1f)'
-                % (status_str, self._servo_raw_positions[0],
-                   self._servo_raw_positions[5]))
-            self._last_logged_raw = status_str
-        m = String()
-        m.data = status_str
-        self.legacy_status_pub.publish(m)
-
-        # Reflect the firmware status in the typed state machine (contract
-        # sec 3.3). The emergency-stop latch is authoritative: while latched,
-        # firmware status must not clear it back to MOVING/IDLE.
-        if self._estop_latched:
-            self._state = ArmState.STATE_ESTOP
-            self._last_firmware_status = status_str
-            return
-
-        # Communication liveness: a successful read means the firmware is
-        # reachable. Refresh the contact timestamp and clear any pending
-        # watchdog on EVERY successful read (not only on a status transition),
-        # so consecutive commands that yield an identical status string
-        # (e.g. repeated SVO_OK__, or a second ARM_DONE with no new transition)
-        # no longer trip a spurious 0x0016 timeout even though the servo moved.
         now_ns = self.get_clock().now().nanoseconds
         self._last_fw_contact_ns = now_ns
-        if self._pending_motion:
-            self._pending_motion = False
-            self.get_logger().info('[watchdog cleared] firmware contact (status=%r)' % status_str)
-
-        # Only act on a status *transition* for the typed state machine, to
-        # avoid 10 Hz churn and log spam.
-        if status_str == self._last_firmware_status:
-            return
-        self._last_firmware_status = status_str
-
-        state, code, message = _decode_firmware_status(status_str)
-        if state is None:
-            self.get_logger().warn('unrecognized firmware status: %r' % status_str)
+        decoded = _decode_firmware_packet(data)
+        if decoded is None:
+            self._firmware_protocol_ok = False
+            self._position_valid = False
+            self._clear_active_motion()
+            raw_header = bytes(data[:8]).hex()
+            if self._error_code != ERR_FW_PROTOCOL:
+                self._set_error(
+                    ERR_FW_PROTOCOL,
+                    'firmware I2C v2 status invalid (header=%s)' % raw_header)
             return
 
-        if state == ArmState.STATE_ERROR:
-            self._set_error(code, message)
-        elif state == ArmState.STATE_SUCCEEDED:
-            # Terminal state of a motion we initiated. Only adopt when we are
-            # actually MOVING; a stale ARM_DONE (e.g. at startup) must not
-            # fabricate success. Dedup prevents re-processing the same code.
-            if self._state == ArmState.STATE_MOVING:
-                self._set_state(ArmState.STATE_SUCCEEDED)
-        else:
-            # Adopt MOVING/IDLE from firmware only when not in a node-side
-            # error, so a "OK" from a *prior* command cannot mask a local
-            # validation error (e.g. MODE_JOINT disabled). SUCCEEDED is
-            # included so the next command can re-enter MOVING.
-            if self._state in (ArmState.STATE_IDLE, ArmState.STATE_MOVING,
-                               ArmState.STATE_SUCCEEDED):
-                self._set_state(state)
+        lifecycle, error, wire_id = decoded
+        self._firmware_protocol_ok = True
+        self._update_joint_feedback(data)
+        status_key = (lifecycle, error, wire_id)
+        if status_key != self._last_logged_raw:
+            self.get_logger().info(
+                '[firmware status] lifecycle=%d error=%d wire_id=%d '
+                '(servo1_raw=%.1f, servo6_base_raw=%.1f)'
+                % (lifecycle, error, wire_id,
+                   self._servo_raw_positions[0], self._servo_raw_positions[5]))
+            self._last_logged_raw = status_key
+        self.legacy_status_pub.publish(
+            String(data=_legacy_status_text(lifecycle, error)))
+
+        if lifecycle == FW_LIFECYCLE_READY and wire_id == 0:
+            restarted = (self._firmware_seen_nonzero_id
+                         or self._active_wire_id != 0
+                         or self._pending_motion)
+            if restarted:
+                self._firmware_restart_latched = True
+                self._firmware_seen_nonzero_id = False
+                self._clear_active_motion()
+                self._set_error(
+                    ERR_FW_RESTARTED,
+                    'firmware restarted; reset error and run home again')
+            elif (not self._firmware_restart_latched
+                  and not self._estop_latched
+                  and self._error_code == 0):
+                self._set_state(ArmState.STATE_IDLE)
+            return
+
+        if wire_id != 0:
+            self._firmware_seen_nonzero_id = True
+
+        if self._estop_latched:
+            self._state = ArmState.STATE_ESTOP
+            return
+
+        # A valid but non-matching packet proves I2C liveness only.
+        if wire_id == 0 or wire_id != self._active_wire_id:
+            return
+
+        if lifecycle in (FW_LIFECYCLE_ACCEPTED, FW_LIFECYCLE_EXECUTING):
+            if (self._pending_motion
+                    and wire_id == self._pending_wire_id):
+                self._pending_motion = False
+                self._set_state(ArmState.STATE_MOVING, self._active_seq)
+                self._flush_queued_command()
+            return
+
+        if lifecycle == FW_LIFECYCLE_COMPLETED:
+            completed_seq = self._active_seq
+            self._clear_active_motion(clear_queue=False)
+            self._set_state(ArmState.STATE_SUCCEEDED, completed_seq)
+            self._flush_queued_command()
+            return
+
+        if lifecycle == FW_LIFECYCLE_FAILED:
+            failed_seq = self._active_seq
+            self._clear_active_motion()
+            self._last_sequence_id = failed_seq
+            code, message = _firmware_error_details(error)
+            if error == FW_ERROR_SERVO_FEEDBACK_FAILED:
+                invalid_ids = [
+                    str(index + 1)
+                    for index, value in enumerate(self._servo_raw_positions)
+                    if not math.isfinite(value) or not 0.0 < value <= 1000.0
+                ]
+                message += '; invalid_servo_ids=%s; servo_raw=%s' % (
+                    ','.join(invalid_ids) or 'unknown',
+                    ','.join('%.0f' % value
+                             for value in self._servo_raw_positions))
+            message = '%s (wire_id=%d)' % (message, wire_id)
+            if error == FW_ERROR_NO_IK_SOLUTION:
+                self._set_recoverable_rejection(code, message)
+            else:
+                self._set_error(code, message)
 
     # ===================== emergency stop (sec 3.2 / 5.4) =====================
     def emergency_stop_callback(self, msg):
@@ -665,6 +873,8 @@ class ArmControllerNode(Node):
             problems.append('estop request active')
         if not self.i2c_ok:
             problems.append('i2c not ok')
+        if not self._firmware_protocol_ok:
+            problems.append('firmware protocol v2 not verified')
         if self._state == ArmState.STATE_MOVING:
             problems.append('arm moving')
         if problems:
@@ -677,7 +887,8 @@ class ArmControllerNode(Node):
         self._estop_request = False
         self._error_code = 0
         self._error_message = ''
-        self._pending_motion = False
+        self._clear_active_motion()
+        self._firmware_restart_latched = False
         self._set_state(ArmState.STATE_IDLE)
         response.success = True
         response.message = 'error reset; estop cleared'

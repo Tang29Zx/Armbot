@@ -3,7 +3,7 @@
 ## 项目概况
 
 - 项目名：Armbot
-- 最近更新：2026-07-13
+- 最近更新：2026-07-16
 - 技术栈：ROS 2 Humble、Python 3.10、I2C
 - 构建与依赖：colcon、ament、APT、pip
 - 主要目录：`ros2_ws/src`、`rdk_video_push`、`docs`、`.github/workflows`
@@ -17,9 +17,9 @@
   `(15, 0, 2) cm`，复位舵机值反解的末端 pitch 约为 `-54.48 deg`。
 - 夹爪规范值固定为 `0=open`、`1=closed`；STM32 理论范围为
   `raw 200=open`、`raw 700=closed`，开机复位值 `raw 226` 接近全开。
-- `P` 单舵机命令的 byte 12..15 传递 little-endian `duration_ms`；Xbox 遥控
-  默认使用 `120 ms`，旧调用者传 `0` 时固件回退为 `1000 ms`。采集仍使用
-  servo 1 反馈反算的实际夹爪位置。
+- I2C v2 使用独立 `H` 标签停止指定舵机当前运动：byte 8 为 servo id；ROS
+  `MODE_GRIPPER_STOP=4` 用它停止夹爪。`H` 可抢占活动夹爪 `P`，但不能丢弃活动 ARM；
+  全局 `S` 仍停止全部舵机。旧 v2 固件应把未知 `H` 安全拒绝为 `BAD_COMMAND`。
 
 ## Xbox 手柄映射
 
@@ -38,8 +38,72 @@
 错误/急停；`LB+RB+Y` 长按回零。急停、错误、Joy/ArmState 超时后必须重新
 回零同步，解除锁存本身不会触发运动。
 
+2026-07-16 用户明确选择取消 RDK 遥操层的全部 XYZ 矩形限位；XYZ 目标直接累计，
+最终由 STM32 IK、关节角和舵机范围决定是否执行。请求 pitch 仍在遥操层限制为
+`[-90, 90] deg`。`NO_IK_SOLUTION` 是非锁存目标拒绝：控制器报告
+`STATE_IDLE/error_code=0x0020`；遥操回退最后成功目标并等待输入回中后自动恢复，
+不需要清错或 Home。其他错误仍保持原安全恢复流程。
+
 ## 已验证记录
 
+- 2026-07-16：RDK 再次启动第二套 `arm_xbox_control.launch.py` 后，两个同名
+  controller/teleop/joy 节点同时存在，`/arm/state` 与 `/arm/command` 各有两个
+  发布者/订阅者，两个 controller 竞争 I2C，实测引发 `Errno 121`、I2C 锁存错误、
+  重复 sequence 和命令确认超时。单次 `/arm/state` 的成功消息不能代表整套系统
+  健康。用户授权后已停止全部 launch 并清理遗留子进程，精确进程检查和 ROS 图均
+  确认无机械臂控制节点；当前保持完全停止，后续只能启动一套。
+- 2026-07-16：RDK 已部署取消 XYZ 遥操限位、pitch `[-90,90] deg` 的版本。
+  部署前停止 enabled 遥操并发送全局 STOP；新栈启动后遥控为 disabled，机械臂
+  `IDLE/position_valid/error_code=0`。运行参数已无 XYZ 限位，RDK 已安装映射的
+  离线验证可从旧边界 `(20,10,25)` 继续累计到 `(21,11,26)`；尚待用户实机运动验收。
+- 2026-07-16：RDK 已继续部署 `NO_IK_SOLUTION` 非锁存恢复：控制器发布
+  `STATE_IDLE/error_code=0x0020`，遥操回退最后成功笛卡尔目标并等待输入回中后
+  自动恢复。部署前后均为遥控 disabled、机械臂 IDLE、反馈有效且无错误；本地
+  action_pkg 回归 72 passed、1 skip，尚待用户在可达域边缘做实机动态验收。
+- 2026-07-15：用户曾实机确认 Xbox 遥控抖动已缓解；随后将笛卡尔遥操从原始速度
+  提高到 `2×` 后再次报告抖动，原问题已从 `DEBUG_CLOSED.md` 移回 `DEBUG.md`。
+  当前 10 Hz/90 ms 不变，满幅平移单步由 `0.1 cm` 增至 `0.2 cm`；输入低通只能
+  缓和起停/变向或真实 Joy 噪声，不能消除恒定输入下的离散短轨迹节拍。舵机反馈
+  问题仍保持用户已验收关闭。
+- 2026-07-15：用户确认当前配套版本由两个仓库的最新提交共同组成：Armbot
+  `29117917dc46bb0de31511a59b5e45628ff9dc1d` 与 armbot-stm32
+  `6cd94ea57c5b68c0920bf8c3a1be24cb2325b936`。两个 SHA 属于不同仓库，版本发布和
+  烧录记录必须成对保存；该映射本身不能证明运行中的 STM32 已烧录对应二进制。
+- 2026-07-15：STM32 的 `LeArm.lib` 中 `ikine()` 固定使用负平方根肘部分支；
+  `set_pitch_range()` 以 `1 deg` 步长返回第一个可行俯仰解，
+  `robot_arm_coordinate_set()` 选解时不参考上一帧关节状态。RDK 只读实机采样证明，
+  单调连续的遥控坐标会约每 5～6 个控制周期触发一次搜索俯仰角的 `1 deg` 阶跃，
+  造成约 `1.9～2.1 deg` 的多关节目标跳变和对应肩关节反馈锯齿；这是当前移动抖动
+  的直接原因，10 Hz/90 ms 微轨迹的停走节拍会进一步放大冲击。
+- 2026-07-15：连续 IK 修复保持固定肘型和 I2C v2 不变，使用 `1 deg` 粗搜索加
+  `0.05 deg` 边界二分，并依据上一条成功命令的四关节角选择连续候选。
+  `1 deg + 120 deg/s * duration` 只作为候选优先线；用户明确选择全部候选超线时
+  仍执行最大关节变化最小的解。离线实测轨迹模型把最大相邻关节变化从
+  `2.121 deg` 降到 `0.486 deg`，Keil ARMCC 5.06 全量链接为 0 errors；后续用户
+  实机确认抖动已缓解并接受当前效果。
+- 2026-07-14：用户已实机验收 Home 后实际 y 回到机械中线，原“Home 后实际 y
+  未归零”问题已关闭；当前 Home 和开机复位的底座目标均为舵机 6 `raw 500`。
+- 2026-07-14：单控制栈 rosbag 证明，RT 闭合后左摇杆期间 ROS 只发布 A 命令、没有
+  发布打开用的 P 命令，但舵机 1 仍从约 `raw 693` 回到约 `raw 231`。直接根因是
+  开机 reset 给 1 号保存了 `raw≈226/2000 ms` 的 `MOVE_TIME_WAIT_WRITE`；后续 A
+  只更新 6～3 号却广播 `MOVE_START`，从而重放 1 号残留的 reset-open 目标。ARM
+  批次必须只 START 本次预写的 6、5、4、3 号；广播 START 只能用于明确覆盖了全部
+  相关舵机 WAIT 目标的批次。
+- 2026-07-14：独立只读固件对舵机 1～6 连续读取完整 9 字节，均为
+  `00 55 55 ID 05 1C posL posH checksum`，解析结果
+  `rx=OK/uart=0x00/skip=1/checksum valid`。舵机断电时每次请求仍收到单独的
+  `0x00`，证明它来自板端半双工收发切换路径，而不是舵机回包。生产解析器遇到
+  帧头前非 `0x55` 字节就立即失败，是当前全部反馈无效的直接软件根因；修复应在
+  有界窗口内搜索帧头并校验完整帧。
+- 2026-07-14 17:25：RDK 部署 v2 后，Home `wire_id=1` 从 `EXECUTING` 进入
+  `FAILED/SERVO_FEEDBACK_FAILED`；ROS 映射为 `error_code=0x0024`，保持
+  `position_valid=false` 和 `/arm/teleop_enabled=false`，没有把无反馈 Home
+  误报为成功。状态包中的舵机 1～6 raw 当时全部为 `0`，具体失败舵机及反馈接收
+  根因仍待确认。
+- 2026-07-14：RDK 实机证明旧版显式回零恢复存在安全缺口：固件持续返回旧
+  `ARM_DONE` 且舵机 2～6 反馈为 `0`、`position_valid=false` 时，控制器仍会按
+  命令时长将 Home 标记成功并允许 A 启用遥控。该行为不能作为回零验收依据，
+  后续实现必须同时验证匹配命令完成与有效位置反馈。
 - 2026-07-13：`action_interfaces`、`action_pkg` 可完成隔离构建；Xbox 遥控与
   控制器相关 `colcon test` 共 48 项，0 failures、0 errors、1 个仓库原有
   copyright skip。

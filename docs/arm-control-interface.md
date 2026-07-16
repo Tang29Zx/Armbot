@@ -1,6 +1,6 @@
 # 机械臂控制接口契约
 
-状态：`v0.1 draft`
+状态：`v0.2 draft`
 
 适用分支：`feature/control`
 
@@ -44,42 +44,83 @@ STOP
 
 | Topic | 类型 | 内容 |
 | --- | --- | --- |
-| `/status_topic` | `std_msgs/msg/String` | STM32 返回的 8 字节状态文本 |
+| `/status_topic` | `std_msgs/msg/String` | ROS 将 v2 生命周期映射为旧 8 字节调试文本 |
 
-### 2.3 当前 I2C 边界
+### 2.3 I2C v2 边界
 
 | 项目 | 当前值 |
 | --- | --- |
 | I2C bus | `5` |
 | slave address | `0x30` |
 | command packet | 固定 32 字节 |
-| status packet | 固定 8 字节 |
+| status packet | 固定 32 字节 |
+| protocol version | `2` |
 
-当前命令包布局：
+命令头统一为：
 
 ```text
-ARM:
-  byte 0       = 'A'
-  byte 4..7    = x, float32 little-endian
-  byte 8..11   = y, float32 little-endian
-  byte 12..15  = z, float32 little-endian
-  byte 16..19  = pitch, float32 little-endian
-  byte 20..23  = min_pitch, float32 little-endian
-  byte 24..27  = max_pitch, float32 little-endian
-  byte 28..31  = time, uint32 little-endian
-
-SERVO:
-  byte 0       = 'P'
-  byte 4       = servo_id, uint8, range 1..6
-  byte 8..11   = angle, float32 little-endian
-  byte 12..15  = duration, uint32 little-endian milliseconds
-
-STOP:
-  byte 0       = 'S'
+byte 0       = tag: 'A' / 'P' / 'H' / 'S'
+byte 1       = protocol_version: uint8, fixed 2
+byte 2..5    = wire_command_id: uint32 little-endian
+byte 6..7    = duration_ms: uint16 little-endian; motion range 1..30000,
+               STOP fixed 0
 ```
 
-`SERVO duration=0` 由固件按兼容默认值 `1000 ms` 处理；固件实际传给串口
-舵机的时长限制为 `1..65535 ms`。
+`wire_command_id` 由 ROS 控制器为每次硬件写入单独生成；它与公共
+`ArmCommand.sequence_id` 分离，由控制器维护二者映射。这样旧字符串调用者使用
+`sequence_id=0` 时仍能可靠关联固件响应。
+
+各命令 payload：
+
+```text
+ARM ('A'):
+  byte 8..11   = x, float32 little-endian
+  byte 12..15  = y, float32 little-endian
+  byte 16..19  = z, float32 little-endian
+  byte 20..23  = pitch, float32 little-endian
+  byte 24..27  = min_pitch, float32 little-endian
+  byte 28..31  = max_pitch, float32 little-endian
+
+SERVO ('P'):
+  byte 8       = servo_id, uint8, range 1..6
+  byte 12..15  = position_raw, float32 little-endian
+
+SERVO_HALT ('H'):
+  byte 8       = servo_id, uint8, range 1..6
+  duration_ms fixed 0; remaining payload bytes fixed 0
+
+STOP ('S'):
+  no payload
+```
+
+`H` 只停止指定舵机当前运动，不改变其他舵机；`S` 仍是停止全部舵机的全局安全
+命令。两者不得复用同一标签，避免旧固件把单舵机停止误解释为全局停止。`H` 是可
+抢占命令：主机必须取消被它替代的活动 `P`，立即发送新的 `wire_command_id`，并忽略
+旧 `P` 的迟到状态；若 `A` 仍在活动，主机必须先等待其生命周期结束再发送 `H`。
+固件成功发出舵机 `MOVE_STOP` 后直接返回 `COMPLETED`；这表示
+停止帧已发送完成，不表示已经通过位置反馈确认舵机静止。旧 v2 固件收到未知 `H`
+必须返回 `FAILED/BAD_COMMAND`，不得执行全局停止。
+
+状态包布局：
+
+```text
+byte 0       = magic: 0xA5
+byte 1       = protocol_version: uint8, fixed 2
+byte 2       = lifecycle: READY=0, ACCEPTED=1, EXECUTING=2,
+               COMPLETED=3, FAILED=4
+byte 3       = firmware_error
+byte 4..7    = wire_command_id: uint32 little-endian
+byte 8..31   = servo 1..6 raw position, float32 little-endian
+```
+
+`firmware_error` 稳定值：`0=NONE`、`1=BAD_PROTOCOL`、`2=BAD_COMMAND`、
+`3=ARM_NOT_READY`、`4=NO_IK_SOLUTION`、`5=SERVO_WRITE_FAILED`、
+`6=SERVO_FEEDBACK_FAILED`、`7=MOTION_TIMEOUT`。
+
+ROS 只有在 `wire_command_id` 与当前命令匹配时才接受
+`ACCEPTED/EXECUTING/COMPLETED/FAILED`。任何可读但 ID 不匹配的状态只能证明
+I2C 链路存活，不能清除命令确认 watchdog。旧版文本状态包不能驱动普通运动；
+协议版本不匹配时只保留 STOP 能力并进入错误状态。
 
 末端坐标 `x/y/z` 的固件单位已确认为厘米（cm）；其他字段仍应以类型化接口和配置契约为准。当前字符串接口只用于联调，不作为稳定公共 API。
 
@@ -96,6 +137,7 @@ uint8 MODE_STOP=0
 uint8 MODE_END_EFFECTOR=1
 uint8 MODE_JOINT=2
 uint8 MODE_GRIPPER=3
+uint8 MODE_GRIPPER_STOP=4
 
 std_msgs/Header header
 uint8 mode
@@ -116,7 +158,12 @@ uint32 sequence_id
 - `MODE_JOINT`：使用 `joint_position`，单位 rad；
 - `MODE_GRIPPER`：使用 `gripper_position`，规范范围 `[0, 1]`，其中
   `0` 表示完全张开、`1` 表示完全闭合；
-- `duration_sec`：期望执行时间，必须为有限正数并限制在配置范围内；
+- `MODE_GRIPPER_STOP`：忽略位置和时长，只停止映射到 `gripper` 的舵机当前运动；
+  它必须抢占未完成的 `MODE_GRIPPER`，但不能替代 `MODE_STOP` 的整臂安全停止；
+  若停止帧在有界重试后仍写入失败，控制节点进入独立的锁存错误
+  `ERR_GRIPPER_STOP_WRITE (0x001A)`，必须执行错误复位和 Home 后才能恢复遥控；
+- `duration_sec`：目标运动模式的期望执行时间，必须为有限正数并限制在配置范围内；
+  `MODE_STOP` 和 `MODE_GRIPPER_STOP` 忽略该字段；
 - `sequence_id`：调用方生成的递增编号，用于关联命令和状态。
 
 未被当前 `mode` 使用的字段必须被控制节点忽略。所有模式在写入硬件前都必须经过范围、有限值和软限位检查。
@@ -158,6 +205,9 @@ string error_message
 - `position_valid=false` 时，调用方不得把位置数组当作真实反馈；
 - `STATE_SUCCEEDED` 表示命令完成，不代表上层任务成功；
 - `error_code` 是稳定机器接口，`error_message` 只用于诊断。
+- `NO_IK_SOLUTION/0x0020` 是非锁存目标拒绝：状态使用 `STATE_IDLE` 并保留
+  `error_code` 和失败命令的 `sequence_id`；下一条有效命令可直接执行，不需要调用
+  `/arm/reset_error`。
 
 ### 3.4 `/joint_states`
 
@@ -222,8 +272,15 @@ id 1。关节直接控制仍保持禁用，直到关节限位和实机方向完�
 4. 急停优先级高于所有普通命令，并保持锁存；
 5. I2C 连续失败后进入 `STATE_ERROR`，不继续发送运动命令；
 6. 正常退出时尽力发送 STOP 并关闭 SMBus；
-7. 无法确认反馈时设置 `position_valid=false`，不伪造关节位置；
-8. 日志不得只记录“失败”，必须包含 `sequence_id` 和稳定错误码。
+7. 单个舵机每批最多重试 3 次；一次失败批次只保留最后有效位置，不立即锁死整机；
+   同一舵机连续 3 个失败批次后必须设置 `position_valid=false` 并报告
+   `SERVO_FEEDBACK_FAILED`，任一有效回读会清零连续失败计数；
+8. 无法在上述有界窗口内确认反馈时，不得伪造新的关节位置；
+9. 日志不得只记录“失败”，必须包含 `sequence_id`、稳定错误码、无效舵机 ID 和
+   六个舵机 raw 快照。
+10. `NO_IK_SOLUTION` 发生在新舵机目标下发前，只拒绝该目标并清除排队命令；
+    不锁存 `STATE_ERROR`，也不要求错误复位或 Home。通信、反馈、写入、超时、协议、
+    固件重启和急停错误仍按原安全恢复流程处理。
 
 底层 STOP 的真实语义必须与 STM32 固件共同确认：是保持当前位置、停止轨迹还是舵机卸力。确认前不能把它描述为急停。
 
@@ -240,9 +297,7 @@ id 1。关节直接控制仍保持禁用，直到关节限位和实机方向完�
 
 ## 7. 当前缺口
 
-- 当前只有字符串命令，没有 `ArmCommand` 和 `ArmState`；
-- `/status_topic` 只有 8 字节文本，不能表达结构化执行状态；
-- 没有真实关节位置反馈契约；
+- v2 协议与真实关节反馈仍需完成固件构建、烧录和故障注入验收；
 - 末端 `x/y/z` 单位已确认为厘米（cm），pitch 等剩余物理语义仍需与 STM32 固件保持一致；
 - 舵机 ID 映射、软限位、急停和通信失败行为尚未完成实机验证。
 

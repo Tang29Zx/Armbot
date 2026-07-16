@@ -108,6 +108,8 @@ RDK X5 VLA bridge（待实现）
 - `MODE_END_EFFECTOR=1`：发送 `x/y/z/pitch/duration_sec`；
 - `MODE_JOINT=2`：接口已定义，但当前代码明确拒绝执行；
 - `MODE_GRIPPER=3`：`gripper_position` 使用 `[0, 1]` 规范范围。
+- `MODE_GRIPPER_STOP=4`：停止夹爪当前运动，不使用位置目标；示教 recorder 必须保留
+  这一实际下发动作，不能把它改写成滞后的 `gripper_position`。
 
 命令使用单调递增的 `sequence_id` 关联状态并拒绝重复、过期和乱序命令。`sequence_id=0` 只作为旧字符串兼容层的特殊值，不进行去重。
 
