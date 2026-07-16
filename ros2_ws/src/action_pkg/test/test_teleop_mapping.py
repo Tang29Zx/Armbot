@@ -17,10 +17,7 @@ from action_pkg.teleop_mapping import (
 
 
 BOUNDS = {
-    'x': (10.0, 20.0),
-    'y': (-10.0, 10.0),
-    'z': (0.0, 25.0),
-    'pitch': (-90.0, 10.0),
+    'pitch': (-90.0, 90.0),
 }
 
 
@@ -76,11 +73,16 @@ def test_rt_closes_and_lt_opens_gripper():
     assert mode == MODE_GRIPPER and opened.gripper == 0.0
 
 
-def test_limits_clamp_targets():
-    target = Target(x=20.0, y=10.0, z=25.0, pitch=10.0)
+def test_xyz_is_unbounded_but_pitch_is_clamped():
+    target = Target(x=20.0, y=10.0, z=25.0, pitch=90.0)
     updated, mode = _integrate(target, [1, 1, 1, 1, 1, 1])
     assert mode == MODE_ARM
-    assert updated == target
+    assert updated == Target(x=21.0, y=11.0, z=26.0, pitch=90.0)
+
+    target = Target(x=10.0, y=-10.0, z=0.0, pitch=-90.0)
+    updated, mode = _integrate(target, [-1, -1, -1, -1, 1, 1])
+    assert mode == MODE_ARM
+    assert updated == Target(x=9.0, y=-11.0, z=-1.0, pitch=-90.0)
 
 
 def test_joy_validation_neutral_and_button_edge():

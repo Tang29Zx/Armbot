@@ -32,6 +32,9 @@ BUTTON_Y = 4
 BUTTON_LB = 6
 BUTTON_RB = 7
 
+ERR_FW_NO_SOLVE = 0x0020
+ARM_TARGET_HISTORY_LIMIT = 64
+
 
 class ArmTeleopNode(Node):
     """Maintain an absolute target while Xbox requests small increments."""
@@ -50,13 +53,14 @@ class ArmTeleopNode(Node):
 
         self._home_target = Target(*map(float, home), gripper=0.0)
         self._target = self._home_target
+        self._last_successful_arm_target = self._home_target
+        self._arm_targets_by_seq = {}
+        self._no_ik_waiting_neutral = False
+        self._last_no_ik_seq = None
         self._expected_home_joints = [math.radians(v) for v in expected_deg]
         self._home_tolerance = math.radians(
             float(self._cfg('home_joint_tolerance_deg')))
         self._bounds = {
-            'x': tuple(self._cfg('x_limits_cm')),
-            'y': tuple(self._cfg('y_limits_cm')),
-            'z': tuple(self._cfg('z_limits_cm')),
             'pitch': tuple(self._cfg('pitch_limits_deg')),
         }
 
@@ -155,10 +159,7 @@ class ArmTeleopNode(Node):
             'home_joint_tolerance_deg': 5.0,
             'home_stable_samples': 3,
             'chord_hold_sec': 1.0,
-            'x_limits_cm': [10.0, 20.0],
-            'y_limits_cm': [-10.0, 10.0],
-            'z_limits_cm': [0.0, 25.0],
-            'pitch_limits_deg': [-90.0, 10.0],
+            'pitch_limits_deg': [-90.0, 90.0],
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -217,6 +218,7 @@ class ArmTeleopNode(Node):
         if (self._enabled and was_closing and not is_closing
                 and self._gripper_close_command_active):
             self._request_gripper_stop()
+        self._resume_after_no_ik_if_neutral(now)
 
     def _state_callback(self, msg):
         self._latest_state = msg
@@ -226,6 +228,8 @@ class ArmTeleopNode(Node):
             self._next_sequence, (int(msg.sequence_id) + 1) & 0xFFFFFFFF)
         if self._next_sequence == 0:
             self._next_sequence = 1
+        if msg.state == ArmState.STATE_SUCCEEDED:
+            self._record_successful_arm_target(int(msg.sequence_id))
 
         close_amount = trigger_pressed(float(self._axes[4]))
         open_amount = trigger_pressed(float(self._axes[5]))
@@ -255,6 +259,10 @@ class ArmTeleopNode(Node):
         else:
             self._reset_gripper_contact_tracking(
                 clear_latch=not self._enabled or not close_requested)
+
+        if msg.error_code == ERR_FW_NO_SOLVE:
+            self._handle_no_ik_rejection(int(msg.sequence_id))
+            return
 
         if msg.state in (ArmState.STATE_ERROR, ArmState.STATE_ESTOP):
             self._startup_sync_allowed = False
@@ -303,6 +311,7 @@ class ArmTeleopNode(Node):
                         self._cfg('home_stable_samples')):
                     self._target = replace(
                         self._home_target, gripper=self._target.gripper)
+                    self._last_successful_arm_target = self._target
                     self._home_pending_seq = None
                     self._home_completion_seen = False
                     self._synced = True
@@ -323,6 +332,7 @@ class ArmTeleopNode(Node):
             if self._home_samples >= int(self._cfg('home_stable_samples')):
                 self._target = replace(
                     self._home_target, gripper=self._target.gripper)
+                self._last_successful_arm_target = self._target
                 self._synced = True
                 self.get_logger().info(
                     'firmware reset pose verified; target synchronized')
@@ -537,6 +547,7 @@ class ArmTeleopNode(Node):
             self._start_home_arm()
             self._home_pending_seq = None
             self._target = target
+            self._last_successful_arm_target = target
             self._synced = True
             self.get_logger().info(
                 'shadow home completed; target synchronized')
@@ -566,7 +577,46 @@ class ArmTeleopNode(Node):
         msg.duration_sec = duration
         msg.sequence_id = self._take_sequence()
         self._command_pub.publish(msg)
+        if mode == ArmCommand.MODE_END_EFFECTOR:
+            self._arm_targets_by_seq[msg.sequence_id] = target
+            while len(self._arm_targets_by_seq) > ARM_TARGET_HISTORY_LIMIT:
+                oldest = next(iter(self._arm_targets_by_seq))
+                del self._arm_targets_by_seq[oldest]
         return msg.sequence_id
+
+    def _record_successful_arm_target(self, sequence):
+        target = self._arm_targets_by_seq.get(sequence)
+        if target is None:
+            return
+        self._last_successful_arm_target = target
+        for pending_sequence in list(self._arm_targets_by_seq):
+            del self._arm_targets_by_seq[pending_sequence]
+            if pending_sequence == sequence:
+                break
+
+    def _handle_no_ik_rejection(self, sequence):
+        if self._last_no_ik_seq == sequence:
+            return
+        self._last_no_ik_seq = sequence
+        self._target = replace(
+            self._last_successful_arm_target,
+            gripper=self._target.gripper,
+        )
+        self._arm_targets_by_seq.clear()
+        self._no_ik_waiting_neutral = True
+        self._set_enabled(False, 'NO_IK target rejected')
+        self.get_logger().warn(
+            'NO_IK target rejected; rolled back to last successful target; '
+            'center controls to resume')
+
+    def _resume_after_no_ik_if_neutral(self, now):
+        if not self._no_ik_waiting_neutral:
+            return
+        reason = self._enable_block_reason(now)
+        if reason:
+            return
+        self._no_ik_waiting_neutral = False
+        self._set_enabled(True, 'controls centered after NO_IK')
 
     def _take_sequence(self):
         sequence = self._next_sequence
@@ -622,6 +672,8 @@ class ArmTeleopNode(Node):
     def _lose_sync(self, reason):
         was_synced = self._synced
         self._synced = False
+        self._no_ik_waiting_neutral = False
+        self._arm_targets_by_seq.clear()
         self._home_samples = 0
         self._gripper_hold_pending_seq = None
         self._gripper_stop_pending_seq = None

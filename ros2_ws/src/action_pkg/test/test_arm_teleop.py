@@ -6,7 +6,7 @@ import time
 from unittest.mock import MagicMock
 
 from action_interfaces.msg import ArmCommand, ArmState
-from action_pkg.arm_teleop_node import ArmTeleopNode
+from action_pkg.arm_teleop_node import ArmTeleopNode, ERR_FW_NO_SOLVE
 import pytest
 import rclpy
 from rclpy.parameter import Parameter
@@ -114,6 +114,48 @@ def test_joy_timeout_disables_and_requires_home(shadow_node):
     shadow_node._check_timeouts(time.monotonic())
     assert shadow_node._enabled is False
     assert shadow_node._synced is False
+
+
+def test_no_ik_rolls_back_and_resumes_after_neutral(shadow_node):
+    deflected = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 0.0, 0.0]
+    shadow_node._enabled = True
+    shadow_node._joy_valid = True
+    shadow_node._axes = deflected
+
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    accepted = shadow_node._command_pub.publish.call_args.args[0]
+    accepted_target = shadow_node._target
+
+    state = ArmState()
+    state.state = ArmState.STATE_SUCCEEDED
+    state.sequence_id = accepted.sequence_id
+    state.position_valid = True
+    state.gripper_position = 0.0
+    shadow_node._state_callback(state)
+    assert shadow_node._last_successful_arm_target == accepted_target
+
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    rejected = shadow_node._command_pub.publish.call_args.args[0]
+    assert shadow_node._target.x > accepted_target.x
+
+    state.state = ArmState.STATE_IDLE
+    state.sequence_id = rejected.sequence_id
+    state.error_code = ERR_FW_NO_SOLVE
+    shadow_node._state_callback(state)
+
+    assert shadow_node._enabled is False
+    assert shadow_node._synced
+    assert shadow_node._target == accepted_target
+    assert shadow_node._no_ik_waiting_neutral
+
+    shadow_node._joy_callback(_joy(axes=deflected))
+    assert shadow_node._enabled is False
+    shadow_node._joy_callback(_joy())
+    assert shadow_node._enabled
+    assert shadow_node._synced
+    assert not shadow_node._no_ik_waiting_neutral
 
 
 def test_real_startup_syncs_after_three_home_samples(tmp_path, monkeypatch):

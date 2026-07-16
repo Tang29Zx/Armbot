@@ -24,7 +24,4 @@ arm_teleop_node:
     home_stable_samples: 3
     chord_hold_sec: 1.0
 
-    x_limits_cm: [10.0, 20.0]
-    y_limits_cm: [-10.0, 10.0]
-    z_limits_cm: [0.0, 25.0]
-    pitch_limits_deg: [-90.0, 10.0]
+    pitch_limits_deg: [-90.0, 90.0]

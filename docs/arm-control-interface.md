@@ -205,6 +205,9 @@ string error_message
 - `position_valid=false` 时，调用方不得把位置数组当作真实反馈；
 - `STATE_SUCCEEDED` 表示命令完成，不代表上层任务成功；
 - `error_code` 是稳定机器接口，`error_message` 只用于诊断。
+- `NO_IK_SOLUTION/0x0020` 是非锁存目标拒绝：状态使用 `STATE_IDLE` 并保留
+  `error_code` 和失败命令的 `sequence_id`；下一条有效命令可直接执行，不需要调用
+  `/arm/reset_error`。
 
 ### 3.4 `/joint_states`
 
@@ -275,6 +278,9 @@ id 1。关节直接控制仍保持禁用，直到关节限位和实机方向完�
 8. 无法在上述有界窗口内确认反馈时，不得伪造新的关节位置；
 9. 日志不得只记录“失败”，必须包含 `sequence_id`、稳定错误码、无效舵机 ID 和
    六个舵机 raw 快照。
+10. `NO_IK_SOLUTION` 发生在新舵机目标下发前，只拒绝该目标并清除排队命令；
+    不锁存 `STATE_ERROR`，也不要求错误复位或 Home。通信、反馈、写入、超时、协议、
+    固件重启和急停错误仍按原安全恢复流程处理。
 
 底层 STOP 的真实语义必须与 STM32 固件共同确认：是保持当前位置、停止轨迹还是舵机卸力。确认前不能把它描述为急停。
 

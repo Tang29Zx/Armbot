@@ -467,7 +467,7 @@ def test_nonmatching_status_does_not_clear_command_watchdog(node):
     assert node._state == ArmState.STATE_MOVING
 
 
-def test_matching_firmware_failure_maps_to_current_command(node):
+def test_no_ik_is_recoverable_without_reset(node):
     node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=3,
                              x=0.0, y=0.0, z=0.0, pitch=0.0,
                              duration_sec=1.0))
@@ -481,10 +481,16 @@ def test_matching_firmware_failure_maps_to_current_command(node):
         FW_ERROR_NO_IK_SOLUTION)
     node.poll_status()
 
-    assert node._state == ArmState.STATE_ERROR
+    assert node._state == ArmState.STATE_IDLE
     assert node._error_code == ERR_FW_NO_SOLVE
     assert node._queued_command is None
     assert node._last_sequence_id == 3
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_END_EFFECTOR, seq=5,
+        x=15.0, y=0.0, z=2.0, pitch=-54.48, duration_sec=0.09))
+    assert node._state == ArmState.STATE_MOVING
+    assert node._error_code == 0
 
 
 def test_matching_motion_timeout_is_never_success(node):

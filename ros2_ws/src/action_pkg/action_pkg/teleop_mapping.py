@@ -85,9 +85,9 @@ def integrate_target(target, axes, dt, *, deadzone, translation_speed,
     if any(value != 0.0 for value in (x_axis, y_axis, z_axis, pitch_axis)):
         updated = replace(
             target,
-            x=clamp(target.x + x_axis * translation_speed * dt, *bounds['x']),
-            y=clamp(target.y + y_axis * translation_speed * dt, *bounds['y']),
-            z=clamp(target.z + z_axis * translation_speed * dt, *bounds['z']),
+            x=target.x + x_axis * translation_speed * dt,
+            y=target.y + y_axis * translation_speed * dt,
+            z=target.z + z_axis * translation_speed * dt,
             pitch=clamp(target.pitch + pitch_axis * pitch_speed * dt,
                         *bounds['pitch']),
         )

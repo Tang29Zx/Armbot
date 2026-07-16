@@ -614,6 +614,14 @@ class ArmControllerNode(Node):
         self.get_logger().error('[seq=%d] err=0x%04X %s'
                                 % (self._last_sequence_id, code, message))
 
+    def _set_recoverable_rejection(self, code, message):
+        """Report a rejected target without latching the controller in ERROR."""
+        self._state = ArmState.STATE_IDLE
+        self._error_code = code
+        self._error_message = message
+        self.get_logger().warn('[seq=%d] err=0x%04X %s'
+                               % (self._last_sequence_id, code, message))
+
     def _set_state(self, state, seq=None):
         if seq is None:
             seq = self._last_sequence_id
@@ -834,7 +842,11 @@ class ArmControllerNode(Node):
                     ','.join(invalid_ids) or 'unknown',
                     ','.join('%.0f' % value
                              for value in self._servo_raw_positions))
-            self._set_error(code, '%s (wire_id=%d)' % (message, wire_id))
+            message = '%s (wire_id=%d)' % (message, wire_id)
+            if error == FW_ERROR_NO_IK_SOLUTION:
+                self._set_recoverable_rejection(code, message)
+            else:
+                self._set_error(code, message)
 
     # ===================== emergency stop (sec 3.2 / 5.4) =====================
     def emergency_stop_callback(self, msg):
