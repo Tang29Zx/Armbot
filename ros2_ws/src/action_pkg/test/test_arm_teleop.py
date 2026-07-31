@@ -98,11 +98,13 @@ def test_b_latches_shadow_estop_until_reset_then_home(shadow_node):
                  for call in shadow_node._command_pub.publish.call_args_list]
     assert [msg.mode for msg in published] == [
         ArmCommand.MODE_GRIPPER,
+        ArmCommand.MODE_WRIST_ROLL,
         ArmCommand.MODE_END_EFFECTOR,
     ]
     assert published[0].gripper_position == 0.0
     assert published[1].x == 15.0
-    assert published[1].pitch == pytest.approx(-54.48)
+    assert published[1].joint_position[4] == pytest.approx(0.0)
+    assert published[2].pitch == pytest.approx(-54.48)
 
 
 def test_joy_timeout_disables_and_requires_home(shadow_node):
@@ -114,6 +116,82 @@ def test_joy_timeout_disables_and_requires_home(shadow_node):
     shadow_node._check_timeouts(time.monotonic())
     assert shadow_node._enabled is False
     assert shadow_node._synced is False
+
+
+def test_arm_stream_sends_one_end_when_stick_returns_to_center(shadow_node):
+    shadow_node._enabled = True
+    shadow_node._joy_valid = True
+    shadow_node._axes = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0]
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+
+    shadow_node._axes = [0.0, 0.0, 0.0, 0.0, 1.0, 1.0]
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+
+    modes = [call.args[0].mode
+             for call in shadow_node._command_pub.publish.call_args_list]
+    assert modes == [
+        ArmCommand.MODE_CARTESIAN_SERVO,
+        ArmCommand.MODE_CARTESIAN_SERVO_END,
+    ]
+
+
+def test_right_stick_horizontal_publishes_wrist_roll(shadow_node):
+    shadow_node._enabled = True
+    shadow_node._joy_valid = True
+    shadow_node._axes = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0]
+    shadow_node._last_tick = time.monotonic() - 0.1
+
+    shadow_node._control_tick()
+
+    command = shadow_node._command_pub.publish.call_args.args[0]
+    assert command.mode == ArmCommand.MODE_WRIST_ROLL
+    assert command.joint_position[4] == pytest.approx(
+        math.radians(2.0), abs=0.05)
+    assert command.pitch == pytest.approx(-54.48)
+
+
+def test_rb_modifies_right_stick_horizontal_to_cartesian_pitch(shadow_node):
+    shadow_node._enabled = True
+    shadow_node._joy_valid = True
+    shadow_node._axes = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0]
+    shadow_node._buttons[7] = 1
+    shadow_node._last_tick = time.monotonic() - 0.1
+
+    shadow_node._control_tick()
+
+    command = shadow_node._command_pub.publish.call_args.args[0]
+    assert command.mode == ArmCommand.MODE_CARTESIAN_SERVO
+    assert command.pitch == pytest.approx(-53.98, abs=0.05)
+    assert command.joint_position[4] == pytest.approx(0.0)
+
+
+def test_a_pause_ends_stream_but_joy_timeout_does_not(shadow_node):
+    shadow_node._enabled = True
+    shadow_node._joy_valid = True
+    shadow_node._axes = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0]
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+
+    pressed = [0] * 16
+    pressed[0] = 1
+    shadow_node._joy_callback(_joy(buttons=pressed))
+    assert shadow_node._command_pub.publish.call_args.args[0].mode == (
+        ArmCommand.MODE_CARTESIAN_SERVO_END)
+
+    shadow_node._enabled = True
+    shadow_node._synced = True
+    shadow_node._joy_valid = True
+    shadow_node._axes = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0]
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    shadow_node._command_pub.reset_mock()
+    shadow_node._last_joy_time = time.monotonic() - 1.0
+    shadow_node._check_timeouts(time.monotonic())
+    shadow_node._command_pub.publish.assert_not_called()
 
 
 def test_no_ik_rolls_back_and_resumes_after_neutral(shadow_node):
@@ -128,7 +206,8 @@ def test_no_ik_rolls_back_and_resumes_after_neutral(shadow_node):
     accepted_target = shadow_node._target
 
     state = ArmState()
-    state.state = ArmState.STATE_SUCCEEDED
+    state.state = ArmState.STATE_MOVING
+    state.command_phase = ArmState.PHASE_EXECUTING
     state.sequence_id = accepted.sequence_id
     state.position_valid = True
     state.gripper_position = 0.0
@@ -141,6 +220,7 @@ def test_no_ik_rolls_back_and_resumes_after_neutral(shadow_node):
     assert shadow_node._target.x > accepted_target.x
 
     state.state = ArmState.STATE_IDLE
+    state.command_phase = ArmState.PHASE_FAILED
     state.sequence_id = rejected.sequence_id
     state.error_code = ERR_FW_NO_SOLVE
     shadow_node._state_callback(state)
@@ -241,7 +321,7 @@ def test_gripper_contact_holds_feedback_and_stops_closing(
     node._last_tick = time.monotonic() - 0.1
     node._control_tick()
     moved = node._command_pub.publish.call_args.args[0]
-    assert moved.mode == ArmCommand.MODE_END_EFFECTOR
+    assert moved.mode == ArmCommand.MODE_CARTESIAN_SERVO
 
     node._axes[1] = 0.0
     node._axes[4] = 1.0
@@ -324,7 +404,7 @@ def test_releasing_close_trigger_stops_without_feedback_hold(
     node._last_tick = time.monotonic() - 0.1
     node._control_tick()
     moved = node._command_pub.publish.call_args.args[0]
-    assert moved.mode == ArmCommand.MODE_END_EFFECTOR
+    assert moved.mode == ArmCommand.MODE_CARTESIAN_SERVO
     node.destroy_node()
     rclpy.shutdown()
 
@@ -349,9 +429,14 @@ def test_explicit_home_requires_three_valid_feedback_samples(
     state.state = ArmState.STATE_SUCCEEDED
     state.sequence_id = opened.sequence_id
     node._state_callback(state)
+    wrist = node._command_pub.publish.call_args.args[0]
+    assert wrist.mode == ArmCommand.MODE_WRIST_ROLL
+    assert node._command_pub.publish.call_count == 2
+    state.sequence_id = wrist.sequence_id
+    node._state_callback(state)
     published = node._command_pub.publish.call_args.args[0]
     assert published.mode == ArmCommand.MODE_END_EFFECTOR
-    assert node._command_pub.publish.call_count == 2
+    assert node._command_pub.publish.call_count == 3
     state.sequence_id = published.sequence_id
 
     node._joy_valid = True
@@ -378,6 +463,45 @@ def test_explicit_home_requires_three_valid_feedback_samples(
     rclpy.shutdown()
 
 
+def test_home_near_open_feedback_stops_gripper_before_wrist(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    rclpy.init()
+    node = ArmTeleopNode()
+    node._command_pub = MagicMock()
+
+    state = ArmState()
+    state.state = ArmState.STATE_IDLE
+    state.position_valid = True
+    state.gripper_position = 0.09
+    node._state_callback(state)
+    node._request_home()
+
+    opened = node._command_pub.publish.call_args.args[0]
+    state.state = ArmState.STATE_MOVING
+    state.sequence_id = opened.sequence_id
+    for _ in range(2):
+        node._state_callback(state)
+    assert node._command_pub.publish.call_count == 1
+
+    node._state_callback(state)
+    stopped = node._command_pub.publish.call_args.args[0]
+    assert stopped.mode == ArmCommand.MODE_GRIPPER_STOP
+    assert node._command_pub.publish.call_count == 2
+    assert node._home_open_pending_seq is None
+    assert node._home_open_stop_pending_seq == stopped.sequence_id
+
+    state.state = ArmState.STATE_SUCCEEDED
+    state.sequence_id = stopped.sequence_id
+    node._state_callback(state)
+    wrist = node._command_pub.publish.call_args.args[0]
+    assert wrist.mode == ArmCommand.MODE_WRIST_ROLL
+    assert node._command_pub.publish.call_count == 3
+    assert node._home_open_stop_pending_seq is None
+    node.destroy_node()
+    rclpy.shutdown()
+
+
 def test_home_stops_if_gripper_open_fails(tmp_path, monkeypatch):
     monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
     rclpy.init()
@@ -396,6 +520,8 @@ def test_home_stops_if_gripper_open_fails(tmp_path, monkeypatch):
 
     assert node._command_pub.publish.call_count == 1
     assert node._home_open_pending_seq is None
+    assert node._home_open_stop_pending_seq is None
+    assert node._home_roll_pending_seq is None
     assert node._home_pending_seq is None
     assert node._synced is False
     node.destroy_node()
@@ -416,6 +542,8 @@ def test_home_feedback_outside_tolerance_does_not_sync(
     state.state = ArmState.STATE_SUCCEEDED
     state.sequence_id = opened.sequence_id
     node._state_callback(state)
+    state.sequence_id = node._home_roll_pending_seq
+    node._state_callback(state)
     state.sequence_id = node._home_pending_seq
     state.position_valid = True
     state.joint_position = [1.0] * 5
@@ -426,12 +554,11 @@ def test_home_feedback_outside_tolerance_does_not_sync(
     rclpy.shutdown()
 
 
-def test_overlapping_stream_duration_is_rejected(tmp_path, monkeypatch):
+def test_invalid_stream_watchdog_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
     rclpy.init()
-    with pytest.raises(ValueError, match='90% of the control period'):
+    with pytest.raises(ValueError, match='stream_watchdog_sec'):
         ArmTeleopNode(parameter_overrides=[
-            Parameter('control_rate_hz', value=10.0),
-            Parameter('command_duration_sec', value=0.12),
+            Parameter('stream_watchdog_sec', value=0.05),
         ])
     rclpy.shutdown()

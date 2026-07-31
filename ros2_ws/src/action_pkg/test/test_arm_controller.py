@@ -13,7 +13,9 @@ or, from the workspace:
 Missing ROS2 dependencies are collection errors; CI cannot skip the suite.
 """
 
+import math
 import struct
+from unittest.mock import MagicMock
 
 from action_interfaces.msg import ArmCommand, ArmState
 from action_pkg.arm_controller_node import (
@@ -25,6 +27,9 @@ from action_pkg.arm_controller_node import (
     ERR_FW_NO_SOLVE,
     ERR_FW_PROTOCOL,
     ERR_FW_RESTARTED,
+    ERR_FW_SERVO_DEADLINE,
+    ERR_FW_STREAM_STEP_TOO_LARGE,
+    ERR_FW_STREAM_TIMEOUT,
     ERR_GRIPPER_STOP_WRITE,
     ERR_FW_SERVO_FEEDBACK,
     ERR_GRIPPER_RANGE,
@@ -33,13 +38,19 @@ from action_pkg.arm_controller_node import (
     ERR_JOINT_DISABLED,
     ERR_NONFINITE_FIELD,
     ERR_STALE_CMD,
+    ERR_WRIST_ROLL_RANGE,
     FW_ERROR_MOTION_TIMEOUT,
     FW_ERROR_NO_IK_SOLUTION,
     FW_ERROR_SERVO_FEEDBACK_FAILED,
+    FW_ERROR_SERVO_DEADLINE_MISSED,
+    FW_ERROR_STREAM_STEP_TOO_LARGE,
+    FW_ERROR_STREAM_TIMEOUT,
     FW_LIFECYCLE_ACCEPTED,
     FW_LIFECYCLE_COMPLETED,
+    FW_LIFECYCLE_EXECUTING,
     FW_LIFECYCLE_FAILED,
     FW_LIFECYCLE_READY,
+    FW_LIFECYCLE_STOPPING,
     I2C_FAIL_THRESHOLD,
     I2C_PROTOCOL_MAGIC,
     I2C_PROTOCOL_VERSION,
@@ -117,7 +128,47 @@ def test_valid_end_effector_moves(node):
     assert node._last_applied_seq == 1
 
 
-def test_motion_rejected_until_v2_status_is_verified(node):
+def test_wrist_roll_uses_servo_two_position_packet(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    cmd = _cmd(
+        ArmCommand.MODE_WRIST_ROLL, seq=1, duration_sec=0.1)
+    cmd.joint_position[4] = math.pi / 2.0
+
+    node.handle_command(cmd)
+
+    packet = writes[-1]
+    assert packet[0] == ord('P')
+    assert packet[1] == I2C_PROTOCOL_VERSION
+    assert struct.unpack_from('<H', packet, 6)[0] == 100
+    assert packet[8] == 2
+    assert struct.unpack_from('<f', packet, 12)[0] == pytest.approx(125.0)
+    assert node._active_mode == ArmCommand.MODE_WRIST_ROLL
+
+
+def test_wrist_roll_rejects_target_outside_configured_limit(node):
+    cmd = _cmd(
+        ArmCommand.MODE_WRIST_ROLL, seq=1, duration_sec=0.1)
+    cmd.joint_position[4] = math.radians(91.0)
+
+    node.handle_command(cmd)
+
+    assert node._state == ArmState.STATE_ERROR
+    assert node._error_code == ERR_WRIST_ROLL_RANGE
+
+
+def test_wrist_roll_rejects_nonfinite_target(node):
+    cmd = _cmd(
+        ArmCommand.MODE_WRIST_ROLL, seq=1, duration_sec=0.1)
+    cmd.joint_position[4] = float('nan')
+
+    node.handle_command(cmd)
+
+    assert node._state == ArmState.STATE_ERROR
+    assert node._error_code == ERR_NONFINITE_FIELD
+
+
+def test_motion_rejected_until_v3_status_is_verified(node):
     node._firmware_protocol_ok = False
     node.handle_command(_cmd(ArmCommand.MODE_END_EFFECTOR, seq=1,
                              x=0.0, y=0.0, z=0.0, pitch=0.0,
@@ -126,7 +177,7 @@ def test_motion_rejected_until_v2_status_is_verified(node):
     assert node._error_code == ERR_FW_PROTOCOL
 
 
-def test_end_effector_uses_v2_packet_layout(node):
+def test_end_effector_uses_v3_packet_layout(node):
     writes = []
     node._i2c_write = lambda data: writes.append(bytes(data)) or True
     node.handle_command(_cmd(
@@ -140,6 +191,112 @@ def test_end_effector_uses_v2_packet_layout(node):
     assert struct.unpack_from('<H', packet, 6)[0] == 90
     assert struct.unpack_from('<6f', packet, 8) == pytest.approx(
         [15.0, 1.0, 2.0, -20.0, -90.0, 90.0])
+
+
+def test_cartesian_stream_waits_for_executing_and_uses_v3_tag(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    node.handle_command(_cmd(
+        ArmCommand.MODE_CARTESIAN_SERVO, seq=8,
+        x=15.0, y=0.1, z=2.0, pitch=-54.48, duration_sec=0.2))
+
+    packet = writes[-1]
+    wire_id = node._active_wire_id
+    assert packet[0] == ord('T')
+    assert packet[1] == 3
+    assert struct.unpack_from('<H', packet, 6)[0] == 200
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_ACCEPTED, wire_id)
+    node.poll_status()
+    assert node._pending_motion is True
+    assert node._command_phase == ArmState.PHASE_ACCEPTED
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_EXECUTING, wire_id)
+    node.poll_status()
+    assert node._pending_motion is False
+    assert node._stream_open is True
+    assert node._command_phase == ArmState.PHASE_EXECUTING
+
+
+def test_latest_stream_target_is_sent_before_pending_end(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    base = dict(x=15.0, y=0.1, z=2.0, pitch=-54.48,
+                duration_sec=0.2)
+    node.handle_command(_cmd(
+        ArmCommand.MODE_CARTESIAN_SERVO, seq=1, **base))
+    first_wire = node._active_wire_id
+    node.handle_command(_cmd(
+        ArmCommand.MODE_CARTESIAN_SERVO, seq=2, **base))
+    node.handle_command(_cmd(
+        ArmCommand.MODE_CARTESIAN_SERVO, seq=3, **base))
+    node.handle_command(_cmd(
+        ArmCommand.MODE_CARTESIAN_SERVO_END, seq=4))
+    assert [packet[0] for packet in writes] == [ord('T')]
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_EXECUTING, first_wire)
+    node.poll_status()
+    latest_wire = node._active_wire_id
+    assert node._active_seq == 3
+    assert [packet[0] for packet in writes] == [ord('T'), ord('T')]
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_EXECUTING, latest_wire)
+    node.poll_status()
+    end_wire = node._active_wire_id
+    assert node._active_seq == 4
+    assert [packet[0] for packet in writes] == [
+        ord('T'), ord('T'), ord('F')]
+    assert writes[-1][6:] == bytes(26)
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_COMPLETED, end_wire)
+    node.poll_status()
+    assert node._state == ArmState.STATE_SUCCEEDED
+    assert node._command_phase == ArmState.PHASE_COMPLETED
+    assert node._stream_open is False
+
+
+def test_stream_step_rejection_keeps_stream_open_for_end(node):
+    node.handle_command(_cmd(
+        ArmCommand.MODE_CARTESIAN_SERVO, seq=1,
+        x=15.0, y=0.1, z=2.0, pitch=-54.48, duration_sec=0.2))
+    wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_EXECUTING, wire_id)
+    node.poll_status()
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_FAILED, wire_id, FW_ERROR_STREAM_STEP_TOO_LARGE)
+    node.poll_status()
+
+    assert node._state == ArmState.STATE_IDLE
+    assert node._error_code == ERR_FW_STREAM_STEP_TOO_LARGE
+    assert node._stream_open is True
+    node.handle_command(_cmd(
+        ArmCommand.MODE_CARTESIAN_SERVO_END, seq=2))
+    assert node._active_mode == ArmCommand.MODE_CARTESIAN_SERVO_END
+
+
+@pytest.mark.parametrize('firmware_error, expected_error', [
+    (FW_ERROR_STREAM_TIMEOUT, ERR_FW_STREAM_TIMEOUT),
+    (FW_ERROR_SERVO_DEADLINE_MISSED, ERR_FW_SERVO_DEADLINE),
+])
+def test_stream_stopping_requires_home(node, firmware_error, expected_error):
+    node.handle_command(_cmd(
+        ArmCommand.MODE_CARTESIAN_SERVO, seq=1,
+        x=15.0, y=0.1, z=2.0, pitch=-54.48, duration_sec=0.2))
+    wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_STOPPING, wire_id, firmware_error)
+    node.poll_status()
+
+    assert node._state == ArmState.STATE_ERROR
+    assert node._command_phase == ArmState.PHASE_STOPPING
+    assert node._error_code == expected_error
+    assert node._stream_open is False
 
 
 def test_end_effector_units_are_centimeters(node):
@@ -611,6 +768,32 @@ def test_different_motion_modes_wait_for_completion(node):
     assert node._active_seq == 2
 
 
+def test_completed_state_is_published_before_queued_motion(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    node.state_pub = MagicMock()
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER_STOP, seq=1))
+    stop_wire_id = node._active_wire_id
+    node.handle_command(_cmd(
+        ArmCommand.MODE_END_EFFECTOR, seq=2,
+        x=15.0, y=0.0, z=2.0, pitch=-54.48,
+        duration_sec=0.09))
+
+    assert node._queued_command.sequence_id == 2
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_COMPLETED, stop_wire_id)
+    node.poll_status()
+
+    completed = node.state_pub.publish.call_args_list[-1].args[0]
+    assert completed.state == ArmState.STATE_SUCCEEDED
+    assert completed.command_phase == ArmState.PHASE_COMPLETED
+    assert completed.sequence_id == 1
+    assert node._active_seq == 2
+    assert [packet[0] for packet in writes] == [ord('H'), ord('A')]
+
+
 def test_newer_arm_command_discards_queued_gripper(node):
     writes = []
     node._i2c_write = lambda data: writes.append(bytes(data)) or True
@@ -694,8 +877,18 @@ def test_i2c_failure_threshold_latches_error(node):
     assert node._error_code == ERR_I2C_LOST
 
 
-def test_corrupt_v2_lifecycle_is_a_protocol_error(node):
+def test_corrupt_v3_lifecycle_is_a_protocol_error(node):
     node._i2c_read_status = lambda: _status(0xFF)
+    node.poll_status()
+
+    assert node._firmware_protocol_ok is False
+    assert node._error_code == ERR_FW_PROTOCOL
+
+
+def test_v2_status_is_rejected_after_v3_upgrade(node):
+    packet = _status(FW_LIFECYCLE_READY)
+    packet[1] = 2
+    node._i2c_read_status = lambda: packet
     node.poll_status()
 
     assert node._firmware_protocol_ok is False

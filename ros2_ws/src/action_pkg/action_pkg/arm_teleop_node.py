@@ -7,11 +7,13 @@ import time
 
 from action_interfaces.msg import ArmCommand, ArmState
 from action_pkg.teleop_mapping import (
+    apply_deadzone,
     controls_neutral,
     integrate_target,
     joints_near_home,
     MODE_ARM,
     MODE_GRIPPER,
+    MODE_WRIST_ROLL,
     rising_edge,
     Target,
     trigger_pressed,
@@ -33,6 +35,7 @@ BUTTON_LB = 6
 BUTTON_RB = 7
 
 ERR_FW_NO_SOLVE = 0x0020
+ERR_FW_STREAM_STEP_TOO_LARGE = 0x0026
 ARM_TARGET_HISTORY_LIMIT = 64
 
 
@@ -62,6 +65,9 @@ class ArmTeleopNode(Node):
             float(self._cfg('home_joint_tolerance_deg')))
         self._bounds = {
             'pitch': tuple(self._cfg('pitch_limits_deg')),
+            'wrist_roll': tuple(
+                math.radians(value)
+                for value in self._cfg('wrist_roll_limits_deg')),
         }
 
         command_topic = ('/arm/teleop_command'
@@ -103,6 +109,9 @@ class ArmTeleopNode(Node):
         self._home_samples = 0
         self._next_sequence = 1
         self._home_open_pending_seq = None
+        self._home_open_stop_pending_seq = None
+        self._home_open_samples = 0
+        self._home_roll_pending_seq = None
         self._home_pending_seq = None
         self._home_completion_seen = False
         self._reset_future = None
@@ -115,6 +124,7 @@ class ArmTeleopNode(Node):
         self._gripper_hold_pending_seq = None
         self._gripper_stop_pending_seq = None
         self._shadow_estop_latched = False
+        self._arm_stream_active = False
         self._chord_started = {'reset': None, 'home': None}
         self._chord_triggered = {'reset': False, 'home': False}
 
@@ -124,11 +134,14 @@ class ArmTeleopNode(Node):
         command_duration = float(self._cfg('command_duration_sec'))
         if command_duration <= 0.0:
             raise ValueError('command_duration_sec must be positive')
-        max_stream_duration = 0.9 / rate
-        if command_duration > max_stream_duration + 1e-9:
+        stream_watchdog = float(self._cfg('stream_watchdog_sec'))
+        if not 0.1 <= stream_watchdog <= 1.0:
+            raise ValueError('stream_watchdog_sec must be within [0.1, 1.0]')
+        home_open_tolerance = float(
+            self._cfg('home_gripper_open_tolerance'))
+        if not 0.0 <= home_open_tolerance <= 1.0:
             raise ValueError(
-                'command_duration_sec must be <= 90%% of the control period '
-                '(%.3fs at %.1fHz)' % (max_stream_duration, rate))
+                'home_gripper_open_tolerance must be within [0.0, 1.0]')
         self._last_tick = time.monotonic()
         self._timer = self.create_timer(1.0 / rate, self._control_tick)
         self._publish_enabled()
@@ -144,15 +157,19 @@ class ArmTeleopNode(Node):
             'state_timeout_sec': 0.5,
             'deadzone': 0.12,
             'trigger_deadzone': 0.05,
-            'translation_speed_cm_sec': 2.0,
-            'pitch_speed_deg_sec': 20.0,
+            'translation_speed_cm_sec': 1.5,
+            'pitch_speed_deg_sec': 5.0,
+            'wrist_roll_speed_deg_sec': 20.0,
             'gripper_speed_sec': 0.5,
             'gripper_contact_min_progress': 0.02,
             'gripper_contact_min_gap': 0.04,
             'gripper_contact_stable_delta': 0.006,
             'gripper_contact_stable_samples': 3,
             'command_duration_sec': 0.09,
+            'stream_watchdog_sec': 0.20,
             'home_gripper_duration_sec': 1.0,
+            'home_gripper_open_tolerance': 0.10,
+            'home_wrist_roll_duration_sec': 1.0,
             'home_duration_sec': 2.0,
             'home_target': [15.0, 0.0, 2.0, -54.48],
             'home_joint_deg': [0.0, 112.08, -89.04, -77.52, 0.0],
@@ -160,6 +177,7 @@ class ArmTeleopNode(Node):
             'home_stable_samples': 3,
             'chord_hold_sec': 1.0,
             'pitch_limits_deg': [-90.0, 90.0],
+            'wrist_roll_limits_deg': [-90.0, 90.0],
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -192,12 +210,16 @@ class ArmTeleopNode(Node):
                 self._shadow_estop_latched = self._shadow
                 self._startup_sync_allowed = False
                 self._home_open_pending_seq = None
+                self._home_open_stop_pending_seq = None
+                self._home_open_samples = 0
+                self._home_roll_pending_seq = None
                 self._home_pending_seq = None
                 self._home_completion_seen = False
                 self._lose_sync('B emergency stop')
 
         if rising_edge(buttons, previous, BUTTON_A):
             if self._enabled:
+                self._finish_arm_stream()
                 self._set_enabled(False, 'A pause')
             else:
                 reason = self._enable_block_reason(now)
@@ -228,8 +250,24 @@ class ArmTeleopNode(Node):
             self._next_sequence, (int(msg.sequence_id) + 1) & 0xFFFFFFFF)
         if self._next_sequence == 0:
             self._next_sequence = 1
-        if msg.state == ArmState.STATE_SUCCEEDED:
+        if msg.command_phase == ArmState.PHASE_EXECUTING:
             self._record_successful_arm_target(int(msg.sequence_id))
+
+        actual_wrist_roll = None
+        if (msg.position_valid and len(msg.joint_position) >= 5
+                and math.isfinite(msg.joint_position[4])):
+            actual_wrist_roll = max(
+                self._bounds['wrist_roll'][0],
+                min(self._bounds['wrist_roll'][1], msg.joint_position[4]))
+        try:
+            wrist_input_neutral = apply_deadzone(
+                float(self._axes[2]), float(self._cfg('deadzone'))) == 0.0
+        except ValueError:
+            wrist_input_neutral = False
+        if (actual_wrist_roll is not None
+                and (not self._enabled or wrist_input_neutral)):
+            self._target = replace(
+                self._target, wrist_roll=actual_wrist_roll)
 
         close_amount = trigger_pressed(float(self._axes[4]))
         open_amount = trigger_pressed(float(self._axes[5]))
@@ -260,7 +298,8 @@ class ArmTeleopNode(Node):
             self._reset_gripper_contact_tracking(
                 clear_latch=not self._enabled or not close_requested)
 
-        if msg.error_code == ERR_FW_NO_SOLVE:
+        if msg.error_code in (ERR_FW_NO_SOLVE,
+                              ERR_FW_STREAM_STEP_TOO_LARGE):
             self._handle_no_ik_rejection(int(msg.sequence_id))
             return
 
@@ -270,6 +309,9 @@ class ArmTeleopNode(Node):
             self._gripper_stop_pending_seq = None
             self._gripper_close_command_active = False
             self._home_open_pending_seq = None
+            self._home_open_stop_pending_seq = None
+            self._home_open_samples = 0
+            self._home_roll_pending_seq = None
             self._home_pending_seq = None
             self._home_completion_seen = False
             self._lose_sync('arm state is ERROR/ESTOP')
@@ -290,10 +332,42 @@ class ArmTeleopNode(Node):
                 return
             if msg.state == ArmState.STATE_SUCCEEDED:
                 self._home_open_pending_seq = None
-                self._target = replace(self._target, gripper=0.0)
+                self._home_open_samples = 0
+                self._continue_home_after_open()
+                return
+            if (healthy_gripper_feedback
+                    and actual_gripper <= float(
+                        self._cfg('home_gripper_open_tolerance'))):
+                self._home_open_samples += 1
+            else:
+                self._home_open_samples = 0
+            if self._home_open_samples >= int(
+                    self._cfg('home_stable_samples')):
+                self._home_open_pending_seq = None
+                self._home_open_samples = 0
+                self._home_open_stop_pending_seq = (
+                    self._request_gripper_stop())
+                self.get_logger().info(
+                    'gripper feedback is safely open; stop command sent')
+            return
+
+        if self._home_open_stop_pending_seq is not None:
+            if msg.sequence_id != self._home_open_stop_pending_seq:
+                return
+            if msg.state == ArmState.STATE_SUCCEEDED:
+                self._home_open_stop_pending_seq = None
+                self._continue_home_after_open()
+            return
+
+        if self._home_roll_pending_seq is not None:
+            if msg.sequence_id != self._home_roll_pending_seq:
+                return
+            if msg.state == ArmState.STATE_SUCCEEDED:
+                self._home_roll_pending_seq = None
+                self._target = replace(self._target, wrist_roll=0.0)
                 self._start_home_arm()
                 self.get_logger().info(
-                    'gripper open completed; home arm command sent')
+                    'wrist home completed; Cartesian home command sent')
             return
 
         if self._home_pending_seq is not None:
@@ -357,11 +431,18 @@ class ArmTeleopNode(Node):
             deadzone=float(self._cfg('deadzone')),
             translation_speed=float(self._cfg('translation_speed_cm_sec')),
             pitch_speed=float(self._cfg('pitch_speed_deg_sec')),
+            wrist_roll_speed=math.radians(
+                float(self._cfg('wrist_roll_speed_deg_sec'))),
             gripper_speed=float(self._cfg('gripper_speed_sec')),
             bounds=self._bounds,
+            pitch_modifier=bool(self._buttons[BUTTON_RB]),
             trigger_deadzone=float(self._cfg('trigger_deadzone')),
         )
-        if mode is None or updated == self._target:
+        if mode != MODE_ARM:
+            self._finish_arm_stream()
+        if mode is None:
+            return
+        if mode != MODE_ARM and updated == self._target:
             return
         if (mode == MODE_ARM
                 and (self._gripper_hold_pending_seq is not None
@@ -377,11 +458,17 @@ class ArmTeleopNode(Node):
             self._gripper_hold_pending_seq = None
             self._reset_gripper_contact_tracking(clear_latch=True)
         self._target = updated
-        ros_mode = (ArmCommand.MODE_END_EFFECTOR
-                    if mode == MODE_ARM else ArmCommand.MODE_GRIPPER)
+        if mode == MODE_ARM:
+            ros_mode = ArmCommand.MODE_CARTESIAN_SERVO
+        elif mode == MODE_WRIST_ROLL:
+            ros_mode = ArmCommand.MODE_WRIST_ROLL
+        else:
+            ros_mode = ArmCommand.MODE_GRIPPER
+        duration = (float(self._cfg('stream_watchdog_sec'))
+                    if mode == MODE_ARM
+                    else float(self._cfg('command_duration_sec')))
         self._publish_command(
-            ros_mode, self._target,
-            float(self._cfg('command_duration_sec')))
+            ros_mode, self._target, duration)
         if closing:
             self._gripper_close_command_active = True
 
@@ -444,13 +531,21 @@ class ArmTeleopNode(Node):
 
     def _request_gripper_stop(self):
         if self._gripper_stop_pending_seq is not None:
-            return
+            return self._gripper_stop_pending_seq
         self._gripper_close_command_active = False
         seq = self._publish_command(
             ArmCommand.MODE_GRIPPER_STOP, self._target, 0.0)
         if not self._shadow:
             self._gripper_stop_pending_seq = seq
         self.get_logger().info('gripper stop command sent')
+        return seq
+
+    def _finish_arm_stream(self):
+        if not self._arm_stream_active:
+            return
+        self._publish_command(
+            ArmCommand.MODE_CARTESIAN_SERVO_END, self._target, 0.0)
+        self._arm_stream_active = False
 
     def _reset_gripper_contact_tracking(self, clear_latch=False):
         self._gripper_close_origin = None
@@ -529,6 +624,8 @@ class ArmTeleopNode(Node):
             return
         if (self._reset_future is not None
                 or self._home_open_pending_seq is not None
+                or self._home_open_stop_pending_seq is not None
+                or self._home_roll_pending_seq is not None
                 or self._home_pending_seq is not None):
             return
         if not self._shadow:
@@ -544,6 +641,8 @@ class ArmTeleopNode(Node):
             target,
             float(self._cfg('home_gripper_duration_sec')))
         if self._shadow:
+            self._start_home_wrist()
+            self._home_roll_pending_seq = None
             self._start_home_arm()
             self._home_pending_seq = None
             self._target = target
@@ -553,8 +652,22 @@ class ArmTeleopNode(Node):
                 'shadow home completed; target synchronized')
         else:
             self._home_open_pending_seq = seq
+            self._home_open_samples = 0
             self.get_logger().info(
                 'gripper open command sent; waiting before home arm motion')
+
+    def _continue_home_after_open(self):
+        self._target = replace(self._target, gripper=0.0)
+        self._start_home_wrist()
+        self.get_logger().info(
+            'gripper open completed; wrist home command sent')
+
+    def _start_home_wrist(self):
+        target = replace(self._home_target, gripper=0.0)
+        self._home_roll_pending_seq = self._publish_command(
+            ArmCommand.MODE_WRIST_ROLL,
+            target,
+            float(self._cfg('home_wrist_roll_duration_sec')))
 
     def _start_home_arm(self):
         target = replace(self._home_target, gripper=0.0)
@@ -573,15 +686,21 @@ class ArmTeleopNode(Node):
         msg.y = target.y
         msg.z = target.z
         msg.pitch = target.pitch
+        msg.joint_position[4] = target.wrist_roll
         msg.gripper_position = target.gripper
         msg.duration_sec = duration
         msg.sequence_id = self._take_sequence()
         self._command_pub.publish(msg)
-        if mode == ArmCommand.MODE_END_EFFECTOR:
+        if mode in (ArmCommand.MODE_END_EFFECTOR,
+                    ArmCommand.MODE_CARTESIAN_SERVO):
             self._arm_targets_by_seq[msg.sequence_id] = target
             while len(self._arm_targets_by_seq) > ARM_TARGET_HISTORY_LIMIT:
                 oldest = next(iter(self._arm_targets_by_seq))
                 del self._arm_targets_by_seq[oldest]
+        if mode == ArmCommand.MODE_CARTESIAN_SERVO:
+            self._arm_stream_active = True
+        elif mode == ArmCommand.MODE_CARTESIAN_SERVO_END:
+            self._arm_stream_active = False
         return msg.sequence_id
 
     def _record_successful_arm_target(self, sequence):
@@ -600,10 +719,12 @@ class ArmTeleopNode(Node):
         self._last_no_ik_seq = sequence
         self._target = replace(
             self._last_successful_arm_target,
+            wrist_roll=self._target.wrist_roll,
             gripper=self._target.gripper,
         )
         self._arm_targets_by_seq.clear()
         self._no_ik_waiting_neutral = True
+        self._finish_arm_stream()
         self._set_enabled(False, 'NO_IK target rejected')
         self.get_logger().warn(
             'NO_IK target rejected; rolled back to last successful target; '
@@ -644,6 +765,8 @@ class ArmTeleopNode(Node):
         if not neutral:
             return 'sticks and triggers must be neutral'
         if (self._home_open_pending_seq is not None
+                or self._home_open_stop_pending_seq is not None
+                or self._home_roll_pending_seq is not None
                 or self._home_pending_seq is not None
                 or self._reset_future is not None):
             return 'home/reset operation is in progress'
@@ -674,6 +797,7 @@ class ArmTeleopNode(Node):
         self._synced = False
         self._no_ik_waiting_neutral = False
         self._arm_targets_by_seq.clear()
+        self._arm_stream_active = False
         self._home_samples = 0
         self._gripper_hold_pending_seq = None
         self._gripper_stop_pending_seq = None

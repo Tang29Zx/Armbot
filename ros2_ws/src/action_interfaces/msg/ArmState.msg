@@ -7,9 +7,19 @@ uint8 STATE_SUCCEEDED=2
 uint8 STATE_ERROR=3
 uint8 STATE_ESTOP=4
 
+uint8 PHASE_NONE=0
+uint8 PHASE_ACCEPTED=1
+uint8 PHASE_EXECUTING=2
+uint8 PHASE_COMPLETED=3
+uint8 PHASE_FAILED=4
+uint8 PHASE_STOPPING=5
+
 std_msgs/Header header
 
 uint8 state
+
+# Firmware lifecycle phase associated with sequence_id.
+uint8 command_phase
 
 # sequence_id of the most recently accepted or completed command.
 uint32 sequence_id

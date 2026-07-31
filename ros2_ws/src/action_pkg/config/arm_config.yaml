@@ -9,6 +9,8 @@ arm_controller_node:
     command_timeout_sec: 3.0
     min_duration_sec: 0.05
     max_duration_sec: 30.0
+    stream_watchdog_min_sec: 0.10
+    stream_watchdog_max_sec: 1.00
 
     joint_names:
       - joint_1_base
@@ -28,8 +30,8 @@ arm_controller_node:
     # Derived from STM32 theta2servo()/robot_arm_roll_set() for serial servos.
     joint_zero_offsets: [0.0, 1.5707963268, 0.0, 0.0, 0.0]
     joint_directions: [1, -1, 1, 1, -1]
-    joint_lower_limits: [-3.14159, -3.14159, -3.14159, -3.14159, -3.14159]
-    joint_upper_limits: [3.14159, 3.14159, 3.14159, 3.14159, 3.14159]
+    joint_lower_limits: [-3.14159, -3.14159, -3.14159, -3.14159, -1.5707963268]
+    joint_upper_limits: [3.14159, 3.14159, 3.14159, 3.14159, 1.5707963268]
 
     # STM32 claw mapping: raw 200=open, raw 700=closed.
     gripper_closed_raw: 700.0

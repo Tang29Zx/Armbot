@@ -2,6 +2,8 @@
 
 import math
 
+import pytest
+
 from action_pkg.teleop_mapping import (
     apply_deadzone,
     controls_neutral,
@@ -9,6 +11,7 @@ from action_pkg.teleop_mapping import (
     joints_near_home,
     MODE_ARM,
     MODE_GRIPPER,
+    MODE_WRIST_ROLL,
     rising_edge,
     Target,
     trigger_pressed,
@@ -18,10 +21,11 @@ from action_pkg.teleop_mapping import (
 
 BOUNDS = {
     'pitch': (-90.0, 90.0),
+    'wrist_roll': (-math.pi / 2.0, math.pi / 2.0),
 }
 
 
-def _integrate(target, axes, dt=1.0):
+def _integrate(target, axes, dt=1.0, pitch_modifier=False):
     return integrate_target(
         target,
         axes,
@@ -29,8 +33,10 @@ def _integrate(target, axes, dt=1.0):
         deadzone=0.12,
         translation_speed=1.0,
         pitch_speed=10.0,
+        wrist_roll_speed=math.radians(20.0),
         gripper_speed=0.5,
         bounds=BOUNDS,
+        pitch_modifier=pitch_modifier,
     )
 
 
@@ -47,7 +53,7 @@ def test_trigger_normalization():
     assert trigger_pressed(-1.0) == 1.0
 
 
-def test_all_cartesian_axis_directions():
+def test_cartesian_axis_directions_and_modified_pitch():
     home = Target()
     x_target, mode = _integrate(home, [0, 1, 0, 0, 1, 1])
     assert mode == MODE_ARM and x_target.x == 16.0
@@ -55,8 +61,21 @@ def test_all_cartesian_axis_directions():
     assert y_target.y == 1.0
     z_target, _ = _integrate(home, [0, 0, 0, 1, 1, 1])
     assert z_target.z == 3.0
-    pitch_target, _ = _integrate(home, [0, 0, 1, 0, 1, 1])
+    pitch_target, mode = _integrate(
+        home, [0, 0, 1, 0, 1, 1], pitch_modifier=True)
+    assert mode == MODE_ARM
     assert pitch_target.pitch == -44.48
+
+
+def test_right_stick_horizontal_controls_wrist_roll_by_default():
+    home = Target()
+    left, mode = _integrate(home, [0, 0, 1, 0, 1, 1])
+    assert mode == MODE_WRIST_ROLL
+    assert left.wrist_roll == pytest.approx(math.radians(20.0))
+
+    right, mode = _integrate(home, [0, 0, -1, 0, 1, 1])
+    assert mode == MODE_WRIST_ROLL
+    assert right.wrist_roll == pytest.approx(math.radians(-20.0))
 
 
 def test_cartesian_has_priority_over_gripper():
@@ -83,6 +102,13 @@ def test_xyz_is_unbounded_but_pitch_is_clamped():
     updated, mode = _integrate(target, [-1, -1, -1, -1, 1, 1])
     assert mode == MODE_ARM
     assert updated == Target(x=9.0, y=-11.0, z=-1.0, pitch=-90.0)
+
+
+def test_wrist_roll_is_clamped_to_ninety_degrees():
+    target = Target(wrist_roll=math.pi / 2.0)
+    updated, mode = _integrate(target, [0, 0, 1, 0, 1, 1])
+    assert mode == MODE_WRIST_ROLL
+    assert updated.wrist_roll == math.pi / 2.0
 
 
 def test_joy_validation_neutral_and_button_edge():

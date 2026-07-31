@@ -29,10 +29,17 @@ except ImportError:
 
 BUS = 5
 ADDR = 0x30
+PROTOCOL_VERSION = 3
+PROTOCOL_MAGIC = 0xA5
 
 
 def status_str(data):
-    return bytes(data[:8]).decode('utf-8', 'ignore').rstrip('\x00')
+    raw = bytes(data)
+    if len(raw) != 32 or raw[0] != PROTOCOL_MAGIC:
+        return 'INVALID:%s' % raw[:8].hex()
+    wire_id = struct.unpack_from('<I', raw, 4)[0]
+    return 'v%d lifecycle=%d error=%d wire=%d' % (
+        raw[1], raw[2], raw[3], wire_id)
 
 
 def read_status(bus, retries=20, delay=0.02):
@@ -57,18 +64,22 @@ def write_cmd(bus, buf):
     bus.i2c_rdwr(w)
 
 
-def build_arm(x=20.0, y=0.0, z=15.0, pitch=0.0, min_pitch=-90.0, max_pitch=90.0, dur_ms=2000):
+def build_arm(x=20.0, y=0.0, z=15.0, pitch=0.0,
+              min_pitch=-90.0, max_pitch=90.0, dur_ms=2000,
+              wire_id=2):
     buf = bytearray(32)
     buf[0] = ord('A')
-    struct.pack_into('<f', buf, 4, x)
-    struct.pack_into('<f', buf, 8, y)
-    struct.pack_into('<f', buf, 12, z)
-    struct.pack_into('<f', buf, 16, pitch)
+    buf[1] = PROTOCOL_VERSION
+    struct.pack_into('<I', buf, 2, wire_id)
+    struct.pack_into('<H', buf, 6, dur_ms)
+    struct.pack_into('<f', buf, 8, x)
+    struct.pack_into('<f', buf, 12, y)
+    struct.pack_into('<f', buf, 16, z)
+    struct.pack_into('<f', buf, 20, pitch)
     # min/max pitch form the IK roll window (set_pitch_range). Must be a
     # non-degenerate range; [0,0] over-constrains the IK -> NO_SOLVE.
-    struct.pack_into('<f', buf, 20, min_pitch)
-    struct.pack_into('<f', buf, 24, max_pitch)
-    struct.pack_into('<I', buf, 28, dur_ms)
+    struct.pack_into('<f', buf, 24, min_pitch)
+    struct.pack_into('<f', buf, 28, max_pitch)
     return buf
 
 
@@ -106,7 +117,7 @@ def main():
     print('[probe] I2C opened ok (bus=%d addr=0x%02X)' % (BUS, ADDR))
 
     # --- baseline: idle status ---
-    print('\n[probe] --- idle reads (expect ARM_RDY_) ---')
+    print('\n[probe] --- idle reads (expect v3 READY) ---')
     idle = {}
     for _ in range(3):
         d, _ = read_status(bus)
@@ -119,6 +130,8 @@ def main():
     # --- STOP: establishes whether ANY command is processed ---
     stop = bytearray(32)
     stop[0] = ord('S')
+    stop[1] = PROTOCOL_VERSION
+    struct.pack_into('<I', stop, 2, 1)
     write_cmd(bus, stop)
     print('[probe] wrote STOP')
     stop_seen = watch(bus, 'after STOP', 3.0)

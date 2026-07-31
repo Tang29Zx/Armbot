@@ -6,6 +6,7 @@ import math
 
 MODE_ARM = 'arm'
 MODE_GRIPPER = 'gripper'
+MODE_WRIST_ROLL = 'wrist_roll'
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,7 @@ class Target:
     y: float = 0.0
     z: float = 2.0
     pitch: float = -54.48
+    wrist_roll: float = 0.0
     gripper: float = 0.0
 
 
@@ -71,18 +73,20 @@ def controls_neutral(axes, deadzone, trigger_deadzone=0.05):
 
 
 def integrate_target(target, axes, dt, *, deadzone, translation_speed,
-                     pitch_speed, gripper_speed, bounds,
-                     trigger_deadzone=0.05):
-    """Integrate a tick, giving Cartesian input priority over gripper."""
+                     pitch_speed, wrist_roll_speed, gripper_speed, bounds,
+                     pitch_modifier=False, trigger_deadzone=0.05):
+    """Integrate one tick, with Cartesian motion taking highest priority."""
     if len(axes) < 6 or not math.isfinite(dt) or dt <= 0.0:
         return target, None
 
     x_axis = apply_deadzone(float(axes[1]), deadzone)
     y_axis = apply_deadzone(float(axes[0]), deadzone)
     z_axis = apply_deadzone(float(axes[3]), deadzone)
-    pitch_axis = apply_deadzone(float(axes[2]), deadzone)
+    right_x_axis = apply_deadzone(float(axes[2]), deadzone)
+    pitch_axis = right_x_axis if pitch_modifier else 0.0
 
-    if any(value != 0.0 for value in (x_axis, y_axis, z_axis, pitch_axis)):
+    if any(value != 0.0 for value in (x_axis, y_axis, z_axis)) or (
+            pitch_modifier and pitch_axis != 0.0):
         updated = replace(
             target,
             x=target.x + x_axis * translation_speed * dt,
@@ -92,6 +96,15 @@ def integrate_target(target, axes, dt, *, deadzone, translation_speed,
                         *bounds['pitch']),
         )
         return updated, MODE_ARM
+
+    if right_x_axis != 0.0:
+        updated = replace(
+            target,
+            wrist_roll=clamp(
+                target.wrist_roll + right_x_axis * wrist_roll_speed * dt,
+                *bounds['wrist_roll']),
+        )
+        return updated, MODE_WRIST_ROLL
 
     close_amount = trigger_pressed(float(axes[4]))
     open_amount = trigger_pressed(float(axes[5]))

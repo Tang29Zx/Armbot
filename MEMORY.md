@@ -3,7 +3,7 @@
 ## 项目概况
 
 - 项目名：Armbot
-- 最近更新：2026-07-16
+- 最近更新：2026-07-17
 - 技术栈：ROS 2 Humble、Python 3.10、I2C
 - 构建与依赖：colcon、ament、APT、pip
 - 主要目录：`ros2_ws/src`、`rdk_video_push`、`docs`、`.github/workflows`
@@ -17,9 +17,9 @@
   `(15, 0, 2) cm`，复位舵机值反解的末端 pitch 约为 `-54.48 deg`。
 - 夹爪规范值固定为 `0=open`、`1=closed`；STM32 理论范围为
   `raw 200=open`、`raw 700=closed`，开机复位值 `raw 226` 接近全开。
-- I2C v2 使用独立 `H` 标签停止指定舵机当前运动：byte 8 为 servo id；ROS
-  `MODE_GRIPPER_STOP=4` 用它停止夹爪。`H` 可抢占活动夹爪 `P`，但不能丢弃活动 ARM；
-  全局 `S` 仍停止全部舵机。旧 v2 固件应把未知 `H` 安全拒绝为 `BAD_COMMAND`。
+- 当前 I2C v3 保持固定 32 字节布局：ROS `MODE_CARTESIAN_SERVO=5`/`T` 更新
+  滚动笛卡尔目标，`MODE_CARTESIAN_SERVO_END=6`/`F` 正常结束流；`H` 停指定舵机，
+  `S` 全局急停。普通运动要求 ROS/STM32 版本一致，`S` 保留跨版本停止能力。
 
 ## Xbox 手柄映射
 
@@ -45,6 +45,32 @@
 不需要清错或 Home。其他错误仍保持原安全恢复流程。
 
 ## 已验证记录
+
+- 2026-07-17：RDK 单控制栈下 Home/相关命令能进入固件 v3 `EXECUTING`，但随后
+  多次返回 `SERVO_FEEDBACK_FAILED (error=6)`；六路 raw 多次全部为 `0`，
+  `position_valid=false`。此前已验收关闭的“机械臂舵机无有效反馈”问题因此重新
+  打开。RDK 启动早期另有 24 次 `Errno 121`，随后 I2C 能恢复并读取合法 v3 状态，
+  所以当前 Home 的直接阻塞是 USART2 舵机反馈而不是 v2/v3 协议不匹配。Windows
+  桌面源码与当前工作树关键文件哈希一致，但本次受限 Keil 构建没有生成 AXF/HEX，
+  板上 v3 镜像的确切源码快照仍无法由构建产物证明；确认前停止反复 Reset/Home。
+
+- 2026-07-17：已把 I2C v3 滚动伺服对应的 ROS 消息、controller、teleop、探针、
+  配置和测试迁移到 RDK `/home/sunrise/Armbot`，保留并核对了既有取消 XYZ 限位的
+  `teleop_mapping.py`。迁移前 10 个目标文件备份为
+  `/home/sunrise/Armbot-qgoal-v3-pre-migration-20260717.tar.gz`，SHA-256 为
+  `bee945bed8e8456b96a1aa768aa17a151653948e4e14fd81ffa8830825997eea`。
+  RDK 隔离构建通过，测试为 `80 passed、1 skipped`；迁移时确认 controller、
+  teleop、launch 和 joy 进程均未运行，也未启动控制栈。STM32 v3 尚未配套刷写，
+  因此当前不得启动普通运动；版本不匹配会拒绝普通命令，跨版本全局 STOP 仍可用。
+
+- 2026-07-17：ROS controller 已实现 I2C v3 和 `ArmState.command_phase`。流式 T
+  必须收到匹配 `EXECUTING` 才发送下一目标；队列独立保存最新 T 与 END，Teleop
+  在摇杆回中或 A 正常暂停时发送一次 END，Joy/ArmState 异常超时不发送 END。
+  最后可达目标按匹配 `PHASE_EXECUTING` 记录，NO_IK/跨度拒绝回退时不会使用尚未
+  安装的请求坐标。首轮速度固定为 `0.5 cm/s、5 deg/s`，watchdog 为 `0.20 s`。
+  `action_interfaces/action_pkg` 构建通过，controller/teleop/mapping 定向回归
+  `78 passed`；完整 `colcon test` 汇总为 `85 tests、0 errors、0 failures、
+  1 skipped`。尚未部署 RDK，也未实机验收。
 
 - 2026-07-16：RDK 再次启动第二套 `arm_xbox_control.launch.py` 后，两个同名
   controller/teleop/joy 节点同时存在，`/arm/state` 与 `/arm/command` 各有两个
