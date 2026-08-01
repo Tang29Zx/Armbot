@@ -1,0 +1,46 @@
+# arm_config.yaml -- config contract (docs/arm-control-interface.md sec 4)
+# ROS2 parameter-file format: node name -> ros__parameters -> params
+
+arm_controller_node:
+  ros__parameters:
+    i2c_bus: 5
+    i2c_address: 48
+
+    command_timeout_sec: 3.0
+    min_duration_sec: 0.1
+    max_duration_sec: 30.0
+
+    joint_names:
+      - joint_1_base
+      - joint_2_shoulder
+      - joint_3_elbow
+      - joint_4_wrist_pitch
+      - joint_5_wrist_roll
+
+    servo_id_map:
+      joint_1_base: 6
+      joint_2_shoulder: 5
+      joint_3_elbow: 4
+      joint_4_wrist_pitch: 3
+      joint_5_wrist_roll: 2
+      gripper: 1
+
+    joint_zero_offsets: [0.0, 0.0, 0.0, 0.0, 0.0]
+    joint_directions: [1, 1, 1, 1, 1]
+    joint_lower_limits: [-3.14159, -3.14159, -3.14159, -3.14159, -3.14159]
+    joint_upper_limits: [3.14159, 3.14159, 3.14159, 3.14159, 3.14159]
+
+    gripper_closed_raw: 0.0
+    gripper_open_raw: 1000.0
+
+    end_effector_frame: base
+    end_effector_units: cm
+
+    # IK end-effector roll (pitch) window in degrees, forwarded to the firmware's
+    # set_pitch_range() inside robot_arm_coordinate_set. Must be a non-degenerate
+    # range (e.g. -90..90, matching the reference firmware examples). Setting both
+    # equal to the target pitch over-constrains the IK -> NO_SOLVE on valid points.
+    pitch_min_deg: -90.0
+    pitch_max_deg: 90.0
+
+    joint_feedback_enabled: true

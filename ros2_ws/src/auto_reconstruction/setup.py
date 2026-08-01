@@ -1,4 +1,6 @@
 from setuptools import find_packages, setup
+import os
+from glob import glob
 
 package_name = 'auto_reconstruction'
 
@@ -10,21 +12,19 @@ setup(
         ('share/ament_index/resource_index/packages',
             ['resource/' + package_name]),
         ('share/' + package_name, ['package.xml']),
+        (os.path.join('share', package_name, 'config'), glob('config/*.yaml')),
+        (os.path.join('share', package_name, 'launch'), glob('launch/*.launch.py')),
     ],
     install_requires=['setuptools'],
     zip_safe=True,
     maintainer='determinant',
     maintainer_email='13816096470@163.com',
-    description='TODO: Package description',
+    description='Perception stack: YOLO26 medicine-box verifier, VLA client, grasp pipeline',
     license='TODO: License declaration',
-    extras_require={
-        'test': [
-            'pytest',
-        ],
-    },
+    tests_require=['pytest'],
     entry_points={
         'console_scripts': [
-            'auto_saver = auto_reconstruction.auto_saver:main',
+            'yolo_verifier = auto_reconstruction.verifier_node:main',
         ],
     },
 )

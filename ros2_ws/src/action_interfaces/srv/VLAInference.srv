@@ -1,0 +1,24 @@
+# VLA (Vision-Language-Action) inference service.
+# PC hosts this service; RDK X5 calls it over DDS via wired Ethernet.
+#
+# Request:  observation image + yolo offsets
+# Response: action sequence (flat array of 7-dim actions)
+
+sensor_msgs/Image observation_image
+string target_object           # e.g. "medicine_box"
+float32 offset_x               # YOLO26 offset x (pixels)
+float32 offset_y               # YOLO26 offset y (pixels)
+---
+bool success                   # True if inference completed without errors
+
+# Action sequence: a flat array of length (trajectory_length * 7).
+# Each 7-element chunk = [dx, dy, dz, droll, dpitch, dyaw, gripper]
+#   dx, dy, dz: delta end-effector position (cm)
+#   droll, dpitch, dyaw: delta orientation (rad)
+#   gripper: canonical range [0.0, 1.0], 0=open, 1=closed
+float32[] action_sequence
+
+uint16 trajectory_length       # Number of waypoints (action_sequence.size() / 7)
+
+float32 inference_time_ms      # Model inference wall-clock time (ms)
+string error_message           # Empty if success; diagnostic otherwise

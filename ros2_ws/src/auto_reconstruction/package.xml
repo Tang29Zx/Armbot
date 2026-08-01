@@ -3,7 +3,7 @@
 <package format="3">
   <name>auto_reconstruction</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
+  <description>Perception stack: YOLO26 medicine-box verifier, VLA client, grasp pipeline</description>
   <maintainer email="13816096470@163.com">determinant</maintainer>
   <license>TODO: License declaration</license>
 
@@ -11,6 +11,7 @@
   <depend>sensor_msgs</depend>
   <depend>cv_bridge</depend>
   <depend>std_srvs</depend>
+  <depend>action_interfaces</depend>
 
   <test_depend>ament_copyright</test_depend>
   <test_depend>ament_flake8</test_depend>
