@@ -4,6 +4,7 @@
 build/
 install/
 log/
+colmap_ws
 
 #=========================
 #Python cache
@@ -95,6 +96,9 @@ HybrIK/
 #=========================
 #Codex
 #=========================
+<<<<<<< HEAD
+.codex
+=======
 .codex
 MEMORY.md
 
@@ -110,3 +114,4 @@ MEMORY.md
 #=========================
 .workbuddy/
 
+>>>>>>> origin/main
