@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - "feature/**"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  software-checks:
+    name: Software checks
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            rdk_video_push/requirements.txt
+            rdk_video_push/requirements-dev.txt
+
+      - name: Install test dependencies
+        run: python -m pip install -r rdk_video_push/requirements-dev.txt
+
+      - name: Check Python syntax
+        run: python -m compileall -q rdk_video_push tests
+
+      - name: Check shell syntax
+        shell: bash
+        run: |
+          while IFS= read -r -d '' script; do
+            bash -n "$script"
+          done < <(find rdk_video_push/scripts -type f -name '*.sh' -print0)
+
+      - name: Run unit tests
+        run: python -m pytest -q
+
+      - name: Reject tracked runtime artifacts
+        shell: bash
+        run: |
+          artifacts="$({ git ls-files | grep -E '(^|/)(logs?|__pycache__)(/|$)|\.(h264|pid|pyc)$'; } || true)"
+          if [[ -n "$artifacts" ]]; then
+            echo "Runtime artifacts must not be tracked:"
+            echo "$artifacts"
+            exit 1
+          fi
+
+  ros2-checks:
+    name: ROS 2 build and tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Set up ROS 2 Humble
+        uses: ros-tooling/setup-ros@v0.7
+        with:
+          required-ros-distributions: humble
+
+      - name: Export ROS 2 Python environment
+        shell: bash
+        run: |
+          source /opt/ros/humble/setup.bash
+          echo "PYTHONPATH=$PYTHONPATH" >> "$GITHUB_ENV"
+          python3 -c 'import rclpy; print(rclpy.__file__)'
+
+      - name: Build and test ROS 2 packages
+        uses: ros-tooling/action-ros-ci@v0.4
+        with:
+          package-name: action_interfaces action_pkg chassis_control
+          target-ros2-distro: humble

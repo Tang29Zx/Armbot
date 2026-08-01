@@ -1,0 +1,128 @@
+name: 实验与性能测试
+description: 记录需要验证的技术假设、对比实验或性能测量
+title: "[Experiment] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        实验 Issue 的目标是让结果可重复、可比较，并能形成明确结论。请在开始前写清假设、指标和成功阈值。
+
+  - type: dropdown
+    id: module
+    attributes:
+      label: 实验模块
+      options:
+        - SLAM / Mapping
+        - Perception
+        - Navigation
+        - Arm Control
+        - VLA
+        - ROS 2 / Communication
+        - Hardware
+        - Web / Visualization
+        - Build / CI
+        - 跨模块或暂不确定
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: 要回答的问题
+      description: 实验结束后希望回答哪个明确问题？
+      placeholder: 例如：在 RDK X5 上将图像分辨率从 1280×720 降到 640×480，能否在定位精度下降不超过 5% 的前提下把处理帧率提高到 20 FPS？
+    validations:
+      required: true
+
+  - type: textarea
+    id: hypothesis
+    attributes:
+      label: 假设
+      description: 在实验前写出预期结果及理由，避免只在结果出来后解释。
+    validations:
+      required: true
+
+  - type: textarea
+    id: variables
+    attributes:
+      label: 变量与对照
+      description: 写明自变量、因变量、控制变量和对照方案。
+      placeholder: |
+        - 自变量：输入分辨率
+        - 因变量：FPS、定位误差、CPU 占用
+        - 控制变量：同一数据、同一模型、同一设备温度范围
+        - 对照：当前默认配置
+    validations:
+      required: true
+
+  - type: textarea
+    id: metrics
+    attributes:
+      label: 指标与成功阈值
+      description: 明确如何测量，以及什么结果算成功。
+      placeholder: |
+        - FPS >= 20
+        - 定位误差增幅 <= 5%
+        - CPU 平均占用 <= 80%
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: 实验环境
+      description: 记录硬件、系统、软件版本、分支或 commit、数据集和关键配置。
+      placeholder: |
+        - Device:
+        - OS:
+        - ROS 2 distro:
+        - Branch / commit:
+        - Dataset / scene:
+        - Relevant configuration:
+    validations:
+      required: true
+
+  - type: textarea
+    id: procedure
+    attributes:
+      label: 实验步骤
+      description: 写出其他人能够重复执行的操作顺序，并说明重复次数、预热和统计方法。
+      placeholder: |
+        1. 清理后台进程并重启设备
+        2. 预热运行 2 分钟
+        3. 每组配置运行 5 次，每次 10 分钟
+        4. 记录均值、标准差和异常情况
+    validations:
+      required: true
+
+  - type: textarea
+    id: artifacts
+    attributes:
+      label: 预期产物
+      description: 列出实验完成后需要上传或链接的内容。
+      placeholder: |
+        - 原始日志
+        - 配置文件
+        - 数据表或图表
+        - 结论摘要
+        - 后续 Issue
+    validations:
+      required: true
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: 实机风险与停止条件
+      description: 说明过热、碰撞、失控、资源耗尽等风险，以及什么情况下必须立即停止实验。
+
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: 开始前确认
+      options:
+        - label: 我已明确实验要回答的问题，而不是只写“试试看”。
+          required: true
+        - label: 我已定义指标和成功阈值。
+          required: true
+        - label: 实机实验已考虑硬件安全、急停和人工监护。
+          required: true

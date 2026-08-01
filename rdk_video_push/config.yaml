@@ -1,0 +1,26 @@
+video:
+  camera_device: "/dev/video0"
+  width: 1280
+  height: 720
+  fps: 15
+  codec: "h264"
+  bitrate: "2500k"
+  srt_url: "srt://YOUR_VPS_IP:8890?streamid=publish:robot001"
+  transport: "srt"
+  encoder_mode: "software"
+  encoder_name: ""
+  ffmpeg_path: "ffmpeg"
+  input_format: "mjpeg"
+  output_format: "mpegts"
+  extra_input_args: []
+  extra_encoder_args: []
+  extra_output_args: []
+
+runtime:
+  auto_restart: true
+  max_restart_count: 5
+  restart_interval_sec: 3
+  stop_timeout_sec: 5
+
+log:
+  level: "INFO"

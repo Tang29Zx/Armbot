@@ -96,4 +96,22 @@ HybrIK/
 #=========================
 #Codex
 #=========================
+<<<<<<< HEAD
 .codex
+=======
+.codex
+MEMORY.md
+
+#=========================
+#RDK video runtime artifacts
+#=========================
+/rdk_video_push/logs/
+*.pid
+*.h264
+
+#=========================
+#WorkBuddy
+#=========================
+.workbuddy/
+
+>>>>>>> origin/main
