@@ -1,0 +1,3 @@
+[submodule "ros2_ws/src/lingbot_map"]
+	path = ros2_ws/src/lingbot_map
+	url = https://github.com/Robbyant/lingbot-map.git
