@@ -68,8 +68,8 @@ def twist_to_motor_speeds(twist, max_linear, max_angular):
     if linear < 1e-6:
         angle = 90.0  # 无平移时默认朝前，避免 atan2 跳变
     else:
-        # 注意：公式里 90°=前，0°=右，所以 angle = atan2(vx, vy)
-        angle = math.atan2(vx, vy) * 180 / math.pi
+        # 90°=前，90°=左，所以 angle = atan2(vx, -vy)
+        angle = math.atan2(vx, -vy) * 180 / math.pi
 
     speed = linear / max_linear * 100.0
     rot = omega / max_angular * 100.0

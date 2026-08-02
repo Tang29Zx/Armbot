@@ -1,0 +1,112 @@
+Panels:
+  - Class: rviz_common/Displays
+    Name: Displays
+  - Class: rviz_common/Views
+    Name: Views
+  - Class: rviz_common/Tool Properties
+    Name: Tool Properties
+
+Visualization Manager:
+  Class: ""
+  Displays:
+    # ── Map ──
+    - Class: rviz_default_plugins/Map
+      Name: Map
+      Topic: /map
+      Alpha: 0.7
+      Color Scheme: map
+      Draw Behind: false
+
+    # ── Global Costmap ──
+    - Class: rviz_default_plugins/Map
+      Name: Global Costmap
+      Topic: /global_costmap/costmap
+      Alpha: 0.4
+      Color Scheme: costmap
+      Draw Behind: false
+
+    # ── Local Costmap ──
+    - Class: rviz_default_plugins/Map
+      Name: Local Costmap
+      Topic: /local_costmap/costmap
+      Alpha: 0.5
+      Color Scheme: costmap
+      Draw Behind: false
+
+    # ── Global Plan (Path) ──
+    - Class: rviz_default_plugins/Path
+      Name: Global Plan
+      Topic: /plan
+      Color: [0, 255, 0]
+      Alpha: 0.8
+      Line Style: Dashed
+      Line Width: 0.03
+
+    # ── Local Plan ──
+    - Class: rviz_default_plugins/Path
+      Name: Local Plan
+      Topic: /local_plan
+      Color: [255, 255, 0]
+      Alpha: 0.8
+      Line Style: Lines
+      Line Width: 0.02
+
+    # ── LaserScan ──
+    - Class: rviz_default_plugins/LaserScan
+      Name: LaserScan
+      Topic: /scan
+      Size (m): 0.01
+      Style: Points
+      Decay Time: 0.2
+      Color Transformer: Intensity
+      Min Intensity: 0
+      Max Intensity: 1000
+
+    # ── Robot Model ──
+    - Class: rviz_default_plugins/RobotModel
+      Name: RobotModel
+      Description Topic: /robot_description
+      Visual Enabled: true
+
+    # ── TF ──
+    - Class: rviz_default_plugins/TF
+      Name: TF
+      Frame Timeout: 15
+      All Enabled: true
+
+    # ── Odometry ──
+    - Class: rviz_default_plugins/Odometry
+      Name: Odometry
+      Topic: /odom
+      Keep: 100
+      Color: [100, 100, 255]
+      Alpha: 0.5
+
+  Global Options:
+    Background Color: [48, 48, 48]
+    Fixed Frame: map
+    Frame Rate: 30
+
+  Tools:
+    - Class: rviz_default_plugins/Interact
+    - Class: rviz_default_plugins/MoveCamera
+    - Class: rviz_default_plugins/Select
+    - Class: rviz_default_plugins/SetInitialPose
+    - Class: rviz_default_plugins/SetGoal             # Renamed to GoalPose in newer rviz
+    - Class: rviz_default_plugins/Measure
+
+  Views:
+    Current:
+      Class: rviz_default_plugins/Orbit
+      Name: Current View
+      Target Frame: base_link
+      Distance: 5.0
+      Focal Point: [0, 0, 0.5]
+      Pitch: 0.8
+      Yaw: 0.0
+
+Window Geometry:
+  Displays:
+    collapsed: false
+  Height: 800
+  Width: 1200

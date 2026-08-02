@@ -1,0 +1,47 @@
+slam_toolbox:
+  ros__parameters:
+    # --- Mode ---
+    mode: localization
+
+    # --- Frames ---
+    odom_frame: odom
+    map_frame: map
+    base_frame: base_link
+    scan_topic: /scan
+
+    # --- Map (loaded from file at launch) ---
+    map_file_name: ""
+    map_start_pose: [0.0, 0.0, 0.0]
+    map_update_interval: 5.0
+    resolution: 0.05
+    max_laser_range: 8.0
+    minimum_time_interval: 0.5
+    transform_timeout: 0.2
+    tf_buffer_duration: 30.0
+
+    # --- Scan matching (localization-tuned) ---
+    minimum_travel_distance: 0.1
+    minimum_travel_heading: 0.3
+    scan_buffer_size: 10
+    scan_buffer_max_scan_distance: 10.0
+    link_match_minimum_response_fine: 0.15
+    link_scan_maximum_distance: 1.5
+
+    # --- Correlation ---
+    correlation_search_space_dimension: 0.5
+    correlation_search_space_resolution: 0.01
+    correlation_search_space_smear_deviation: 0.1
+
+    # --- Localization-specific ---
+    enable_update_loop_closure: false
+    use_scan_matching: true
+    use_scan_barycenter: true
+    minimum_travel_distance: 0.1
+    minimum_travel_heading: 0.3
+
+    # --- Publishers ---
+    publish_map: false   # map comes from map_server, not localization
+    publish_scan_match: false
+    publish_pose_graph: false
+    publish_tf: true
+    use_sim_time: false

@@ -1,0 +1,32 @@
+/**:
+  ros__parameters:
+    # --- Serial configuration ---
+    port: "/dev/ttyUSB0"
+    baudrate: 230400
+
+    # --- Frame ---
+    frame_id: "laser"
+
+    # --- Scan parameters ---
+    # YDLIDAR X2/X4: 360 degrees, 0.28 deg resolution (~1300 points/scan)
+    # YDLIDAR G2:   360 degrees, 0.18 deg resolution (~2000 points/scan)
+    # Adjust these for your specific model.
+    range_min: 0.05
+    range_max: 12.0
+    angle_min: 0.0
+    angle_max: 6.2831853      # 360 degrees in rad
+    angle_increment: 0.0049    # ~0.28 deg for X2/X4
+    frequency: 8.0             # scan frequency (Hz)
+    samp_rate: 4               # sampling rate (kilo points/sec), 4=default
+
+    # --- Driver behavior ---
+    ignore_array: ""
+    resolution_fixed: true
+    auto_reconnect: true
+    reversion: true
+    isToFL: false
+    inverted: false
+
+    # --- Intensity ---
+    intensity: false
+    intensity_range: 5000.0
