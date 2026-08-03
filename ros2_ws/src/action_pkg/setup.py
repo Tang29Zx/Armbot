@@ -28,6 +28,7 @@ setup(
     entry_points={
         'console_scripts': [
             'arm_controller = action_pkg.arm_controller_node:main',
+            'arm_state_filter = action_pkg.arm_state_filter_node:main',
             'arm_teleop = action_pkg.arm_teleop_node:main',
             # Backward-compatible alias for the old i2c_controller entry point.
             'i2c_controller = action_pkg.arm_controller_node:main',

@@ -1,6 +1,6 @@
 # 机械臂控制接口契约
 
-状态：`v0.4 current`
+状态：`v0.5 current`
 
 适用分支：`feature/vla`
 
@@ -56,6 +56,7 @@ STOP
 | Topic | 类型 | 内容 |
 | --- | --- | --- |
 | `/arm/state` | `action_interfaces/msg/ArmState` | 类型化状态、命令序号、反馈和错误码 |
+| `/arm/state_filtered` | `action_interfaces/msg/ArmState` | 仅供 VLA/记录器使用的因果平滑反馈 |
 | `/joint_states` | `sensor_msgs/msg/JointState` | 仅在位置反馈有效时发布 |
 | `/status_topic` | `std_msgs/msg/String` | 将 v3 生命周期映射成旧文本，仅供兼容和调试 |
 
@@ -123,7 +124,7 @@ v1 的根本限制：
 当前协议版本固定为 `3`。命令头统一为：
 
 ```text
-byte 0       = tag: 'A' / 'T' / 'F' / 'P' / 'H' / 'S'
+byte 0       = tag: 'A' / 'T' / 'F' / 'P' / 'U' / 'G' / 'H' / 'S'
 byte 1       = protocol_version: uint8, fixed 3
 byte 2..5    = wire_command_id: uint32 little-endian
 byte 6..7    = duration_ms: uint16 little-endian; motion range 1..30000,
@@ -149,6 +150,17 @@ SERVO ('P'):
   byte 8       = servo_id, uint8, range 1..6
   byte 12..15  = position_raw, float32 little-endian
 
+DIRECT_SERVO_STREAM ('U'):
+  byte 8       = servo_id, uint8, range 1..2
+  byte 12..15  = position_raw, float32 little-endian
+  byte 16..19  = max_velocity_raw_sec, float32 little-endian
+  byte 20..23  = max_acceleration_raw_sec2, float32 little-endian
+  duration_ms  = stream watchdog, range 100..1000 ms
+
+DIRECT_SERVO_END ('G'):
+  byte 8       = servo_id, uint8, range 1..2; must match the active direct stream
+  duration_ms fixed 0; remaining payload bytes fixed 0
+
 SERVO_HALT ('H'):
   byte 8       = servo_id, uint8, range 1..6
   duration_ms fixed 0; remaining payload bytes fixed 0
@@ -158,9 +170,19 @@ STOP ('S'):
 ```
 
 `CARTESIAN_SERVO ('T')` 与 `ARM ('A')` 使用相同的 24 字节笛卡尔 payload，
-但 `duration_ms` 表示流 watchdog，当前允许 `100..1000 ms`，默认 `200 ms`。
+但 `duration_ms` 表示流 watchdog，当前允许 `100..1000 ms`，默认 `300 ms`。
+默认值为 10 Hz 目标、10 Hz 状态轮询和匹配 `EXECUTING` 后再发送下一条 `T`
+留出一个完整周期的调度余量。
 `CARTESIAN_SERVO_END ('F')` 不携带目标且 `duration_ms=0`，只结束当前流并等待
 最后安装的关节目标稳定完成。`A` 保留给 Home、探针和其他一次性运动。
+
+`U/G` 是 1、2 号舵机的单通道滚动伺服，用于 Xbox 夹爪和腕转。每次只允许一个
+直接舵机流；`U` 收到新绝对 raw 目标后更新移动参考，STM32 以 `25 Hz/40 ms`
+生成连续位置小段。`G` 停止接收移动参考，平滑到最后目标并在反馈稳定三轮后完成。
+相邻目标最大跨度为 `150 raw`，超出时以 `STREAM_STEP_TOO_LARGE` 非锁存拒绝且不
+覆盖旧目标。`U` 超过 watchdog 未更新时按当前速度制动，报告
+`STOPPING/STREAM_TIMEOUT`，停止后要求重新 Home。`P` 语义不变，继续供 Home、
+探针和非流式调用使用。
 
 `H` 只停止指定舵机当前运动，不改变其他舵机；`S` 仍是停止全部舵机的全局安全
 命令。两者不得复用同一标签，避免旧固件把单舵机停止误解释为全局停止。`H` 是可
@@ -199,7 +221,7 @@ ROS ArmCommand(sequence_id)
   -> 任一步失败：FAILED + firmware_error
 ```
 
-流式 `T/F` 生命周期：
+流式 `T/F` 与 `U/G` 生命周期：
 
 ```text
 T 收包：ACCEPTED
@@ -210,6 +232,11 @@ F 收包：ACCEPTED / EXECUTING
 异常缺失 F：STOPPING/STREAM_TIMEOUT
   -> 按加速度刹停后 FAILED，必须重新 Home
 ```
+
+其中 `U` 的目标安装不需要 IK，因此收包校验并安装移动参考后直接进入匹配序号的
+`EXECUTING`；`G` 的完成条件为规划命令接近目标、速度接近零、对应舵机反馈距目标
+不超过 `10 raw` 且相邻反馈变化不超过 `2 raw`，连续三轮成立。`T/F` 与 `U/G`
+互斥，Home、一次性 `A/P`、`H/S` 都会使活动流失效。
 
 `NO_IK_SOLUTION` 与 `STREAM_STEP_TOO_LARGE` 都只拒绝当前 `T`，不覆盖最后有效
 `q_goal`。控制器只有看到匹配 T 的 `EXECUTING` 才发送下一条流式目标，并先保存该
@@ -310,6 +337,10 @@ uint8 MODE_GRIPPER_STOP=4
 uint8 MODE_CARTESIAN_SERVO=5
 uint8 MODE_CARTESIAN_SERVO_END=6
 uint8 MODE_WRIST_ROLL=7
+uint8 MODE_GRIPPER_SERVO=8
+uint8 MODE_GRIPPER_SERVO_END=9
+uint8 MODE_WRIST_ROLL_SERVO=10
+uint8 MODE_WRIST_ROLL_SERVO_END=11
 
 std_msgs/Header header
 uint8 mode
@@ -328,20 +359,24 @@ uint32 sequence_id
 - `MODE_STOP`：忽略其他目标字段，立即请求安全停止；
 - `MODE_END_EFFECTOR`：使用 `x/y/z/pitch`，其中 `x/y/z` 单位固定为厘米（cm）；
 - `MODE_CARTESIAN_SERVO`：使用绝对 `x/y/z/pitch` 更新流式目标；
-  `duration_sec` 是 watchdog，Xbox 默认 `0.20 s`；
+  `duration_sec` 是 watchdog，Xbox 默认 `0.30 s`；
 - `MODE_CARTESIAN_SERVO_END`：不携带新目标，正常结束当前流并等待最后目标稳定；
 - `MODE_JOINT`：使用 `joint_position`，单位 rad；
 - `MODE_WRIST_ROLL`：只使用 `joint_position[4]`，单位 rad，范围由
   `joint_5_wrist_roll` 的关节限位约束；controller 将其转换为映射舵机的 `P`
   单舵机位置帧。该模式不表示通用 `MODE_JOINT` 已开放；
+- `MODE_WRIST_ROLL_SERVO`：使用相同腕转目标，但转换为 `U` 滚动目标；对应
+  `MODE_WRIST_ROLL_SERVO_END` 发送 `G` 并等待最后目标稳定；
 - `MODE_GRIPPER`：使用 `gripper_position`，规范范围 `[0, 1]`，其中
   `0` 表示完全张开、`1` 表示完全闭合；
+- `MODE_GRIPPER_SERVO`：使用相同夹爪目标但转换为 `U` 滚动目标；对应
+  `MODE_GRIPPER_SERVO_END` 发送 `G`；
 - `MODE_GRIPPER_STOP`：忽略位置和时长，只停止映射到 `gripper` 的舵机当前运动；
   它必须抢占未完成的 `MODE_GRIPPER`，但不能替代 `MODE_STOP` 的整臂安全停止；
   若停止帧在有界重试后仍写入失败，控制节点进入独立的锁存错误
   `ERR_GRIPPER_STOP_WRITE (0x001A)`，必须执行错误复位和 Home 后才能恢复遥控；
 - `duration_sec`：目标运动模式的期望执行时间，必须为有限正数并限制在配置范围内；
-  `MODE_STOP`、`MODE_GRIPPER_STOP` 和 `MODE_CARTESIAN_SERVO_END` 忽略该字段；
+  `MODE_STOP`、`MODE_GRIPPER_STOP` 和三个流式 END 模式忽略该字段；
 - `sequence_id`：调用方生成的递增编号，用于关联命令和状态。
 
 未被当前 `mode` 使用的字段必须被控制节点忽略。所有模式在写入硬件前都必须经过范围、有限值和软限位检查。
@@ -400,7 +435,24 @@ string error_message
   `STREAM_TIMEOUT/0x0027` 和 `SERVO_DEADLINE_MISSED/0x0028` 会先发布
   `PHASE_STOPPING`，随后进入锁存错误并要求 Home。
 
-### 3.4 `/joint_states`
+### 3.4 `/arm/state_filtered`
+
+消息类型仍为 `action_interfaces/msg/ArmState`。该派生话题只供 VLA observation、
+数据记录和可视化使用，不参与 controller、teleop、急停、完成判定或 Home 同步。
+
+- 原始 `header`、生命周期、`sequence_id` 和错误字段原样保留，以便与
+  `/arm/command` 和相机时间戳对齐；
+- 五关节位置和夹爪反馈分别执行 3 点因果中值滤波，再执行 One Euro 自适应低通：
+  `cutoff=min_cutoff+beta*abs(filtered_derivative)`。静止时使用较低截止频率抑制
+  量化噪声，运动时按速度提高截止频率以减小延迟；
+- One Euro 使用输入消息时间戳计算 `dt`。时间戳不递增或相邻样本间隔超过
+  `reset_gap_sec` 时清空滤波历史，并从当前样本重新初始化，禁止使用异常 `dt`；
+- `/arm/state` 必须始终保留为未滤波事实来源，采集器应同时记录两个话题；
+- 输入 `position_valid=false`、位置非有限或状态为 `STATE_ERROR/STATE_ESTOP` 时，
+  清空滤波历史并发布 `position_valid=false`，不得用旧平滑值伪造有效观测；
+- 离线训练与在线推理必须使用相同的因果算法，禁止用依赖未来帧的中心滑窗替代。
+
+### 3.5 `/joint_states`
 
 消息类型：`sensor_msgs/msg/JointState`
 
@@ -417,7 +469,7 @@ gripper
 
 机械臂关节位置单位为 rad。夹爪在 `/joint_states` 中必须使用其物理关节单位：旋转夹爪使用 rad，直线夹爪使用 m；`[0, 1]` 规范值只用于 `ArmCommand` 和 `ArmState`。消息必须按 `name` 匹配，调用方不能依赖数组的偶然顺序。
 
-### 3.5 `/arm/reset_error`
+### 3.6 `/arm/reset_error`
 
 接口类型：`std_srvs/srv/Trigger`
 
@@ -438,6 +490,12 @@ i2c_address
 command_timeout_sec
 min_duration_sec
 max_duration_sec
+stream_watchdog_min_sec
+stream_watchdog_max_sec
+gripper_stream_max_velocity_raw_sec
+gripper_stream_max_acceleration_raw_sec2
+wrist_stream_max_velocity_deg_sec
+wrist_stream_max_acceleration_deg_sec2
 joint_names
 servo_id_map
 joint_zero_offsets
@@ -448,6 +506,11 @@ gripper_closed_raw
 gripper_open_raw
 end_effector_frame
 end_effector_units
+state_filter_window_size
+state_filter_min_cutoff_hz
+state_filter_beta
+state_filter_derivative_cutoff_hz
+state_filter_reset_gap_sec
 ```
 
 STM32 源码已确认串口舵机映射为：底座到腕部依次使用 id 6～2，夹爪使用
@@ -464,6 +527,9 @@ id 1。通用关节直接控制仍保持禁用；已确认的腕转专用路径�
 3. 拒绝过期、重复、非有限值、越界和未知模式命令；
 4. 急停优先级高于所有普通命令，并保持锁存；
 5. I2C 连续失败后进入 `STATE_ERROR`，不继续发送运动命令；
+   对快速返回的 `EAGAIN/EREMOTEIO` 状态读取错误，同一 100 ms 轮询内最多尝试
+   3 次、间隔 5 ms；全部耗尽才计为一次连续失败。`ETIMEDOUT` 不重试，避免把
+   内核级长阻塞重复放大；
 6. 正常退出时尽力发送 STOP 并关闭 SMBus；
 7. 单个舵机每批最多重试 3 次；一次失败批次只保留最后有效位置，不立即锁死整机；
    同一舵机连续 3 个失败批次后必须设置 `position_valid=false` 并报告

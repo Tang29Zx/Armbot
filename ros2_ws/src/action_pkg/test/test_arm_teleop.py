@@ -137,6 +137,8 @@ def test_arm_stream_sends_one_end_when_stick_returns_to_center(shadow_node):
         ArmCommand.MODE_CARTESIAN_SERVO,
         ArmCommand.MODE_CARTESIAN_SERVO_END,
     ]
+    stream = shadow_node._command_pub.publish.call_args_list[0].args[0]
+    assert stream.duration_sec == pytest.approx(0.30)
 
 
 def test_right_stick_horizontal_publishes_wrist_roll(shadow_node):
@@ -148,10 +150,32 @@ def test_right_stick_horizontal_publishes_wrist_roll(shadow_node):
     shadow_node._control_tick()
 
     command = shadow_node._command_pub.publish.call_args.args[0]
-    assert command.mode == ArmCommand.MODE_WRIST_ROLL
+    assert command.mode == ArmCommand.MODE_WRIST_ROLL_SERVO
+    assert command.duration_sec == pytest.approx(0.30)
     assert command.joint_position[4] == pytest.approx(
         math.radians(2.0), abs=0.05)
     assert command.pitch == pytest.approx(-54.48)
+
+
+def test_wrist_stream_sends_one_end_at_center(shadow_node):
+    shadow_node._enabled = True
+    shadow_node._joy_valid = True
+    shadow_node._axes = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0]
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+
+    shadow_node._axes = [0.0, 0.0, 0.0, 0.0, 1.0, 1.0]
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+
+    modes = [call.args[0].mode
+             for call in shadow_node._command_pub.publish.call_args_list]
+    assert modes == [
+        ArmCommand.MODE_WRIST_ROLL_SERVO,
+        ArmCommand.MODE_WRIST_ROLL_SERVO_END,
+    ]
 
 
 def test_rb_modifies_right_stick_horizontal_to_cartesian_pitch(shadow_node):
@@ -304,7 +328,7 @@ def test_gripper_contact_holds_feedback_and_stops_closing(
         node._state_callback(state)
 
     hold = node._command_pub.publish.call_args.args[0]
-    assert hold.mode == ArmCommand.MODE_GRIPPER
+    assert hold.mode == ArmCommand.MODE_GRIPPER_STOP
     assert hold.gripper_position == pytest.approx(0.311)
     assert node._target.gripper == pytest.approx(0.311)
     assert node._gripper_contact_latched
@@ -368,7 +392,8 @@ def test_releasing_close_trigger_stops_without_feedback_hold(
     node._last_tick = time.monotonic() - 0.1
     node._control_tick()
     close = node._command_pub.publish.call_args.args[0]
-    assert close.mode == ArmCommand.MODE_GRIPPER
+    assert close.mode == ArmCommand.MODE_GRIPPER_SERVO
+    assert close.duration_sec == pytest.approx(0.30)
     assert node._gripper_close_command_active
     close_target = node._target.gripper
     node._command_pub.reset_mock()
@@ -380,10 +405,10 @@ def test_releasing_close_trigger_stops_without_feedback_hold(
     node._state_callback(state)
 
     node._joy_callback(_joy())
-    stop = node._command_pub.publish.call_args.args[0]
-    assert stop.mode == ArmCommand.MODE_GRIPPER_STOP
+    end = node._command_pub.publish.call_args.args[0]
+    assert end.mode == ArmCommand.MODE_GRIPPER_SERVO_END
     assert node._target.gripper == pytest.approx(close_target)
-    assert node._gripper_stop_pending_seq == stop.sequence_id
+    assert node._gripper_stop_pending_seq is None
 
     node._command_pub.reset_mock()
     state.gripper_position = 0.32
@@ -394,13 +419,6 @@ def test_releasing_close_trigger_stops_without_feedback_hold(
     assert node._target.gripper == pytest.approx(0.32)
 
     node._axes[1] = 1.0
-    node._last_tick = time.monotonic() - 0.1
-    node._control_tick()
-    node._command_pub.publish.assert_not_called()
-
-    state.state = ArmState.STATE_SUCCEEDED
-    state.sequence_id = stop.sequence_id
-    node._state_callback(state)
     node._last_tick = time.monotonic() - 0.1
     node._control_tick()
     moved = node._command_pub.publish.call_args.args[0]

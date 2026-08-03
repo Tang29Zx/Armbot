@@ -3,7 +3,7 @@
 ## 项目概况
 
 - 项目名：Armbot
-- 最近更新：2026-07-17
+- 最近更新：2026-08-01
 - 技术栈：ROS 2 Humble、Python 3.10、I2C
 - 构建与依赖：colcon、ament、APT、pip
 - 主要目录：`ros2_ws/src`、`rdk_video_push`、`docs`、`.github/workflows`
@@ -45,6 +45,44 @@
 不需要清错或 Home。其他错误仍保持原安全恢复流程。
 
 ## 已验证记录
+
+- 2026-08-01：RDK controller 已部署 I2C 同周期快速读重试：只对
+  `EAGAIN/EREMOTEIO` 最多尝试 3 次、间隔 5 ms，`ETIMEDOUT` 不重试；耗尽后
+  仍只计为一次轮询失败，原有连续失败锁止保持不变。RDK 两个 ROS 包
+  构建通过，包内回归为 `113 passed、1 skipped`，控制栈保持停止。覆盖前
+  备份为 `/home/sunrise/Armbot-i2c-read-retry-pre-20260801-021140.tar.gz`，
+  SHA-256 为 `156f5aee6555b528e9de5ee2fc39577a492830817dceaf54b9378f0af2e7df5b`。
+  这不代表内核 `lost arbitration/controller timed out` 根因已修复；STM32 续期修复
+  HEX `32380e4d639b234f93acb7b2dd82ce916dca727411b02b104bde730bb137d1e8`
+  仍待刷写和实机验收。
+
+- 2026-08-01：RDK 已同步 XYZ `ARM_NOT_READY` 错误边沿修复，controller 会在
+  非恢复性固件失败时立即发布 `ERROR/FAILED`；RDK 两个 ROS 包重建成功，包内回归
+  为 `110 passed、1 skipped`。覆盖前备份为
+  `/home/sunrise/Armbot-readiness-fix-pre-20260801-014544.tar.gz`，SHA-256 为
+  `edfee6a8435de3d245a9fef1d649280447252b81d72a16a31b48fd8ba852be06`。
+  STM32 空闲反馈自动重同步修复对应 HEX SHA-256 为
+  `239506e74f6932035c2e5ae04f94c4d32b27c17c18a450ebf7fa994c93f5058f`；后续已刷写，
+  并暴露出增量 IK/确认时间被计入 300 ms watchdog 的边界竞态。续期修复的新 HEX
+  SHA-256 为 `32380e4d639b234f93acb7b2dd82ce916dca727411b02b104bde730bb137d1e8`，
+  尚未刷写和实机验收。
+
+- 2026-08-01：RDK `/home/sunrise/Armbot` 已部署夹爪和腕转 `U/G` 直接舵机流的
+  ROS 接口、controller、teleop、配置与测试；9 个目标文件 checksum 与本地一致，
+  `action_interfaces/action_pkg` 构建成功，安装接口包含模式 8～11，包内回归为
+  `109 passed、1 skipped`。部署前备份为
+  `/home/sunrise/Armbot-direct-servo-pre-20260801-005644.tar.gz`，SHA-256 为
+  `2db83642d011df487be19c7fba7916c054f0e1255bb249593e577e4828c1d761`。部署期间
+  控制栈保持停止；配套 STM32 HEX 尚未刷写，所以该记录不代表实机运动已验收。
+
+- 2026-07-31：RDK `/home/sunrise/Armbot` 已部署 VLA-only 的 3 点因果中值加
+  One Euro 状态滤波，以及 Xbox `0.30 s` 流 watchdog。One Euro 默认参数为
+  `min_cutoff=1.0 Hz`、`beta=1.5`、导数截止 `1.0 Hz`、时间重置间隔 `0.5 s`；
+  `/arm/state` 和控制安全链保持未滤波。同步的 9 个文件与本地 SHA-256 一致，
+  RDK 构建通过，完整 pytest 为 `105 passed、1 skipped`，控制栈保持停止。覆盖前
+  备份位于 `/home/sunrise/Armbot-one-euro-pre-20260731-232948.tar.gz`，SHA-256
+  为 `9a27350dc7e2df981007996dd941ad0262c4d426798fcaa55545b2f740591b4a`。
+  该记录只证明部署和离线回归，不代表真实 rosbag 延迟或 VLA 采集质量已验收。
 
 - 2026-07-17：RDK 单控制栈下 Home/相关命令能进入固件 v3 `EXECUTING`，但随后
   多次返回 `SERVO_FEEDBACK_FAILED (error=6)`；六路 raw 多次全部为 `0`，

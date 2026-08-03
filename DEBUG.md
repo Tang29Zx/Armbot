@@ -80,7 +80,7 @@
 
 ## P1：右摇杆左右无法控制腕部旋转
 
-状态：**已验证，待用户实机验收**
+状态：**空闲 readiness 修复已实机生效；新 watchdog 时序 HEX 待刷写与复测**
 
 ### 现象与根因
 
@@ -108,6 +108,81 @@
   `target is not synchronized; run home first`。当前 Home 无反应的直接原因是夹爪
   打开生命周期不完成，不是 Home 组合键映射错误。反馈约 raw 249、目标 raw 200，
   已经接近安全全开位置，但旧 Home 状态机只接受精确 `COMPLETED`，因此无法继续。
+- 2026-07-31：用户进一步确认夹爪开闭和右摇杆腕转都经常“一卡一卡”。两条路径
+  虽映射到不同舵机（夹爪 1、腕转 2），但共用同一旧式单舵机 `P` 协议：teleop
+  以 `10 Hz` 积分目标，每条命令固定执行 `90 ms`。满幅腕转每周期增加约 `2 deg`
+  （约 8 raw），夹爪每周期增加 `0.05` 规范值（约 25 raw），理想时序也会形成
+  `90 ms` 运动加约 `10 ms` 停顿。
+- controller 只在 10 Hz 状态轮询读到该 `P` 的 `ACCEPTED/EXECUTING` 后发送队列中
+  的最新同模式目标。若确认晚一轮，中间目标会被合并，下一段可能变成约
+  `4 deg/50 raw` 的位移，但执行时长仍为 `90 ms`；因此调度和 I2C 抖动会表现为
+  “停一下再跳快”，而不是均匀降速。
+- STM32 `HostServoSet()` 对舵机 1/2 直接发送 `MOVE_TIME_WRITE`，每个新目标都会
+  清除并重建单次位置跟踪；该路径没有 `q_goal/q_cmd/q_velocity`、速度前馈或
+  加速度限制。现有 25 Hz AR4 滚动伺服只覆盖 IK 舵机 6～3，因此没有修复夹爪和
+  腕转的周期性重规划。
+- 本次日志 `gripper contact detected; holding at feedback 0.376` 是夹爪闭合反馈
+  连续三帧停滞后冻结当前位置的既有保护，会产生一次有意停止，但它只作用于夹爪，
+  不能解释腕转同样卡顿。One Euro 也只发布 `/arm/state_filtered`，不参与 teleop、
+  接触判断或舵机命令。
+- 当前实机日志存在证据缺口：尝试读取 RDK 最新日志时，两条只读 SSH 查询持续无
+  响应；随后两次带 5 秒上限的 SSH 均连接超时，三次 ping 为 100% 丢包。故当前
+  不能排除 I2C/系统调度问题进一步放大卡顿，但这些附加故障不是上述固定短段节拍
+  存在的前提。
+- 2026-08-01：修复契约冻结为 I2C v3 新增 `U/G`：`U` 仅允许 1/2 号舵机并安装
+  单通道移动参考，STM32 以 25 Hz 连续下发 40 ms 小段；`G` 平滑完成最后目标。
+  旧 `P` 保持一次性语义，Home/探针不迁移；接触检测继续用 `H` 即时停止。当时为
+  契约冻结阶段，RDK 仍离线，未部署或实机驱动。
+- 2026-08-01：本地实现完成。STM32 新增 raw 空间单舵机移动参考、速度前馈、
+  加速度/换向/限位约束、END 稳定完成、watchdog/deadline 制动以及写/反馈失效；
+  ROS 新增夹爪/腕转各自的 STREAM/END 模式，controller 保证最新 `U` 先于 `G`，
+  teleop 回中发一次平滑 END，只有夹爪接触继续使用即时 `H`。
+- 离线证据：固件六组 host `-Werror` 测试、Cortex-M3 改动对象编译和 `cppcheck`
+  通过；GNU 全工程链接为 `text=73788、data=1744、bss=5036 bytes`，生成
+  `LeArm-v3-direct-servo.hex`，SHA-256
+  `32380e4d639b234f93acb7b2dd82ce916dca727411b02b104bde730bb137d1e8`。
+  ROS `colcon test` 为 `115 tests, 0 failures, 1 skipped`。这些只证明离线契约与
+  调度算法，尚不能替代真实总线时延、夹爪接触和连续 60 秒运动验收。
+- 2026-08-01：将 `U/G` 涉及的消息、controller、teleop、配置、测试和控制契约共
+  9 个文件同步到 RDK `/home/sunrise/Armbot`，checksum 复核与本地一致；远端
+  `scripts/build-rdk-ros2.sh` 对 `action_interfaces/action_pkg` 构建返回 `rc=0`，
+  安装接口已包含模式 8～11，包内回归为 `109 passed、1 skipped`。部署前备份为
+  `/home/sunrise/Armbot-direct-servo-pre-20260801-005644.tar.gz`，SHA-256 为
+  `2db83642d011df487be19c7fba7916c054f0e1255bb249593e577e4828c1d761`。同步和测试期间
+  controller、teleop、filter、joy 均保持停止；本轮未刷写 STM32，不能开始实机运动。
+- 2026-08-01 实机失败：启动日志显示 Home 的夹爪、腕转、笛卡尔阶段分别通过
+  `wire_id=1～4`，最终笛卡尔 Home 在 `1785517356.672` 返回 `COMPLETED`；第一条
+  XYZ `T` 在约 2.20 秒后即以 `ARM_NOT_READY` 拒绝，此后同类请求持续失败。
+  `wire_id=52/53` 的直接舵机 STREAM/END 随后仍能 `EXECUTING/COMPLETED`，且完成后
+  XYZ 继续失败，结合 `robot_arm_ready` 只在启动赋值，排除了初始化失败和直接舵机
+  持续占用；实际失效条件为 `rolling_servo_ready=false`。
+- 根因位于本次固件反馈接线：`JointFeedbackAttemptFailed()` 在任意舵机连续三次读取
+  失败后，即使滚动伺服处于空闲，也调用 `rolling_servo_feedback_failed()`；后者只要
+  已初始化便执行 `rolling_servo_invalidate(..., false)`。空闲路径不发布错误事件，且
+  `sync_allowed=false` 使后续恢复的四路有效反馈无法重新初始化。因此 ROS 可重新显示
+  `position_valid=true`，STM32 却永久拒绝 `T`，直到再次完成 Home。日志中稍后出现
+  `servo6_base_raw=0` 后又恢复到约 `502`，与该瞬态读失败触发器一致，但首次失效的
+  具体舵机 ID 当前未被空闲诊断上报。
+- 同时确认一个放大问题：controller 的状态发布定时器先于状态轮询；下一个 10 Hz
+  请求会把刚设置的 `STATE_ERROR` 覆盖成 `MOVING`，teleop 可能看不到错误边沿并继续
+  发送，所以日志出现数百个 `ARM_NOT_READY`。END 告警只是所有 `T` 都未成功打开流
+  后的次生结果。修复需让空闲反馈失败保留自动重同步能力、活动运动失败仍安全锁存，
+  并保证 `ARM_NOT_READY` 错误边沿在接受下一请求前送达 teleop。
+- 2026-08-01 已修复：空闲滚动伺服的反馈重试耗尽现在只重置关节快照并保留
+  `sync_allowed`，下一轮完整 6～3 号有效反馈会重新初始化；活动运动中的同类失败
+  仍执行失效、报告 `SERVO_FEEDBACK_FAILED` 并要求 Home。controller 对 STOPPING 和
+  非恢复性 FAILED 立即发布一次 `ArmState`，避免下一条 10 Hz 请求覆盖错误边沿。
+  两个失败回归均先复现旧行为、修改后通过；固件六组 host 测试、Cortex-M3
+  `-Werror`、`cppcheck`、ROS 定向 `98 passed` 和完整 `115 tests、0 failures、
+  1 skipped` 均通过。该版 `239506e...f5058f` HEX 随后已刷写并证明空闲自动重同步
+  生效，但实机又暴露 P0 条目记录的 watchdog 安装/确认竞态；它已被上方当前 HEX
+  取代。
+- 2026-08-01：controller 修复和对应回归已同步到 RDK，三个文件 SHA-256 与本地
+  一致；`scripts/build-rdk-ros2.sh` 重建两个 ROS 包成功，RDK 包内测试为
+  `110 passed、1 skipped`。同步前没有控制进程运行；备份位于
+  `/home/sunrise/Armbot-readiness-fix-pre-20260801-014544.tar.gz`，SHA-256 为
+  `edfee6a8435de3d245a9fef1d649280447252b81d72a16a31b48fd8ba852be06`。
+  固件根因修复只存在于新 HEX，未重新刷写前 XYZ 仍会复现旧问题。
 
 ### 影响
 
@@ -160,6 +235,11 @@
 - 把整个 `/usr/lib/python3/dist-packages` 提前会继续触发系统 NumPy 源文件含空字节，
   因此不能把全局 `PYTHONPATH` 调序作为长期修复。本次部署只在 `/tmp` 遮蔽可选
   docutils 并单独暴露 setuptools 59.6.0；正常 ROS 运行环境未修改。
+- 2026-07-31 状态滤波节点部署时进一步确认，仅暴露系统 `setuptools` 包仍会与
+  `/usr/local` 的 `pkg_resources` 80.9.0 元数据混用，并报缺少
+  `setuptools.command.bdist_wheel`。在同一 `/tmp` 兼容目录同时暴露系统版
+  `pkg_resources`、`_distutils_hack` 和 59.6.0 元数据后，`action_pkg` 构建通过；
+  该处理仍只是构建进程级绕过，不是系统环境修复。
 
 ### 影响与关闭标准
 
@@ -429,7 +509,7 @@ Home 后机械臂实际 `y` 没有归零，但遥控节点仍可能记录
 
 ## P0：Xbox 遥控时机械臂异常抖动
 
-状态：**AR4 式移动参考已部署；旧周期启停已消除，剩余抖动待完整运动采样，仍阻塞正式 VLA 采集**
+状态：**300 ms watchdog 安装/确认时序已修复并生成 HEX，待刷写与实机验证**
 
 ### 现象
 
@@ -523,6 +603,84 @@ Home 后机械臂实际 `y` 没有归零，但遥控节点仍可能记录
   训练 episode。正式采集前仍需在 x/y/z/pitch/腕转的恒定输入运动中同步记录
   `/joy`、`/arm/command`、`/arm/state` 和相机时间戳，证明所有运动关节无周期反向、
   图像无明显机械振动并完成 action/observation 延迟标定。
+- 2026-07-31：本地新增旁路 `arm_state_filter_node`，从原始 `/arm/state` 发布同类型
+  `/arm/state_filtered`。五关节和夹爪使用 3 点因果中值加 `alpha=0.5` EMA；原始
+  时间戳、命令序号、生命周期和错误字段不变。无效、非有限或 ERROR/ESTOP 输入会
+  清空历史并把派生输出标为无效，controller、teleop 和安全逻辑仍只使用原始话题。
+- 新滤波器 12 项算法/节点测试和完整安装态 action_pkg 回归通过，结果为
+  `101 passed、1 skipped`。隔离 ROS domain 的端到端阶跃输出为
+  `0 -> 0.5 -> 0.75 -> 0.875 -> 0.9375`，且保留输入时间戳。
+- 2026-07-31：过滤节点、配置、两个 launch、`setup.py` 和测试已经同步到 RDK；
+  7 个源码文件 SHA-256 与本地逐一一致，RDK `action_pkg` 重建通过，直接运行完整
+  pytest 为 `101 passed、1 skipped`，安装态已列出 `action_pkg arm_state_filter`，
+  过滤模块导入和 Xbox launch 解析通过，配置解析到源码中的
+  `state_filter_config.yaml`。覆盖前备份为
+  `/home/sunrise/Armbot-state-filter-pre-20260731-2046.tar.gz`，SHA-256 为
+  `c2ef2f4a3511be0bd0680c09e4ce0cdaa6d901f6cf98c83592ebe6f326751831`。
+  部署完成后控制栈保持停止，I2C 和手柄设备无占用；下次启动 Xbox launch 后才会
+  出现 `/arm/state_filtered`，本次部署尚未替代低速实机和 VLA 采样验收。
+- 2026-07-31：本地将旁路滤波的第二级从固定 `alpha=0.5` EMA 替换为 One Euro，
+  保留前置 3 点因果中值。默认使用 `min_cutoff=1.0 Hz`、`beta=1.5`、导数截止
+  `1.0 Hz`，并按输入消息时间戳计算 `dt`；时间不递增或间隔超过 `0.5 s` 时从
+  当前样本重新初始化。尖峰、自适应响应、参数校验、reset、时间异常和节点安全状态
+  共 16 项目标测试通过，`action_pkg` 完整回归为 `105 passed、1 skipped`，colcon
+  构建通过。该版本尚未再次同步到 RDK，也未用真实 rosbag 量化静止降噪和运动延迟。
+- 2026-07-31 23:29：One Euro 源码、配置、测试和两份控制契约，以及遥操
+  `stream_watchdog_sec=0.30` 已同步到 RDK `/home/sunrise/Armbot`；9 个目标文件
+  SHA-256 与本地逐一一致。覆盖前备份为
+  `/home/sunrise/Armbot-one-euro-pre-20260731-232948.tar.gz`，SHA-256 为
+  `9a27350dc7e2df981007996dd941ad0262c4d426798fcaa55545b2f740591b4a`。
+  RDK 专用脚本重建 `action_interfaces/action_pkg` 通过，远端完整 pytest 为
+  `105 passed、1 skipped`；安装态配置确认 One Euro 默认参数和 `0.30 s`
+  watchdog。部署前后均未发现 controller、teleop、filter 或 joy 控制进程，本轮
+  没有启动机械臂。仍需 rosbag 和低速实机量化后才能判断该滤波参数是否适合 VLA。
+- 2026-07-31 21:07 左右，固件先对新目标 `wire_id=663` 报
+  `ACCEPTED`，约 203 ms 后却对最后有效目标 `wire_id=662` 报
+  `STOPPING/STREAM_TIMEOUT`，随后为 `FAILED/STREAM_TIMEOUT`。controller 因始终
+  等不到 `663` 的匹配 `EXECUTING`，3 秒后又报 `0x0016` ACK timeout；下一条
+  `wire_id=664` 因滚动伺服已失效而被 `ARM_NOT_READY` 拒绝。
+- 这次超时不是同一时刻的直接 I2C timeout：RDK 内核最近一次 `lost arbitration`
+  在约 23 秒前，没有与上述 203 ms 窗口对应的 `controller timed out`。源码路径
+  已确认：`rolling_servo_submit()` 在收包时更新 `last_target_tick` 并启动增量 IK；
+  controller 在匹配 `GOAL_INSTALLED/EXECUTING` 前不发下一条 `T`；若 IK 在
+  `watchdog_ms=200` 内未完成，`rolling_servo_service()` 会取消待处理 IK并以旧的
+  `active_command_id` 进入受控制动。该目标至少没有在 watchdog 内产生可见的
+  `GOAL_INSTALLED`。
+- 2026-07-31 约 21:38:16 的完整前序日志进一步证明问题不限于慢 IK：
+  `wire_id=1802` 在 `5095.315` 报 `ACCEPTED`、在 `5095.421` 报
+  `EXECUTING`，说明 IK 已成功安装；但下一条 `wire_id=1803` 在 `5095.517` 已被
+  `ARM_NOT_READY` 拒绝，之后才读到旧 `wire_id=1802` 的
+  `FAILED/STREAM_TIMEOUT`。RDK 内核在 21:22:53 后没有新的 I2C 错误，排除同时段
+  I2C 直接触发。
+- controller 的状态轮询周期和目标发布周期均为 100 ms，且只有读到匹配
+  `EXECUTING` 才清除 pending 并发送队列中的下一条 `T`。因此一次
+  `ACCEPTED -> EXECUTING` 已消耗约 106 ms，再叠加下一轮写入、STM32 主循环取包和
+  调度抖动，就会撞上从前一条 T 收包开始计算的 200 ms watchdog。结合主循环在
+  `rolling_servo_service()` 前后各处理一次命令，边界到达的 T 还可能恰好落在
+  watchdog 检查之后，形成确定的时序竞态。
+- 修复必须同时覆盖“候选 IK 慢”和“成功 IK 的 ACK/轮询总延迟接近 watchdog”两条
+  路径，并补充真实 IK 最大耗时；单纯提高 ROS ACK timeout、移动平均或重新 Home
+  只能恢复当次操作，不能消除该闭环缺陷。I2C 仲裁丢失仍是独立未关闭问题。
+- 2026-07-31：已将 Xbox/RDK 和 STM32 的默认流 watchdog 同步调整为 `300 ms`，
+  保持协议范围 `100..1000 ms`、显式 END、急停和错误路径不变。新增固件边界回归
+  已证明默认值在 `299 ms` 不超时、`300 ms` 进入 `STOPPING_TIMEOUT`；ROS 遥操
+  回归确认默认 `T.duration_sec=0.30`。该修改尚未同步到 RDK、尚未重新生成并刷写
+  固件，因此当前只能标记“已修改，待实机验证”，不能关闭抖动问题。
+- 2026-08-01 新固件实机日志复现更精确的边界竞态：`wire_id=107/226` 已成功返回
+  `EXECUTING`，但连续两次 RDK I2C 状态读取失败使 controller 约到 T 收包后的
+  `300 ms` 才看见确认。固件此时从原收包时间触发 `STREAM_TIMEOUT` 并撤销同步，
+  所以下一条 `wire_id=108/227` 先显示 `ARM_NOT_READY`，随后才读回旧命令的
+  `STREAM_TIMEOUT`。该顺序证明本次首因不是舵机反馈失败；I2C `121` 是暴露竞态的
+  延迟来源。
+- 根因是 host 按契约等待匹配 `GOAL_INSTALLED/EXECUTING` 才发送下一条 T，而固件
+  将增量 IK 和确认等待都计入同一个 watchdog。修复后，成功安装 IK 会把 watchdog
+  起点更新到安装时刻；收包仍立即更新起点，安装失败不会续期。新增 290 ms 安装
+  延迟回归先在旧实现于 300 ms 边界失败，修改后通过，并确认安装后 `299 ms`
+  不停止、`300 ms` 仍进入 `STOPPING_TIMEOUT`。
+- 当前修复已通过六组固件 host `-Werror` 测试、Cortex-M3 对象编译、`cppcheck`
+  和 GNU 全工程链接。新 HEX 为 `text=73788、data=1744、bss=5036 bytes`，
+  SHA-256 `32380e4d639b234f93acb7b2dd82ce916dca727411b02b104bde730bb137d1e8`；
+  尚未刷写，不能把离线结果记为实机恢复。
 
 ### 2026-07-15 IK 连续性复核
 
@@ -850,10 +1008,60 @@ Home 后机械臂实际 `y` 没有归零，但遥控节点仍可能记录
 
 ## P1：高频命令与 I2C 读取在固件暂停监听窗口内冲突
 
-状态：**STM32 I2C 自动恢复已修改，目标编译和静态检查通过；待固件链接、烧录和实机故障注入**
+状态：**RDK 快速读重试已部署并通过回归，待实机复测；底层仲裁丢失仍待排查**
 
 ### 实机证据
 
+- 2026-08-01 02:21:47～02:22:13，RDK 内核在当前单控制栈会话中连续报告数十次
+  `i2c_dw_handle_tx_abort: lost arbitration`，02:22:14 紧接着报
+  `controller timed out`。ROS 最后一条正常状态为 `wire_id=270`，约 1.15 s 后
+  `seq=271` 返回 `Errno 110`，随后固件依次报
+  `STREAM_TIMEOUT/wire_id=271` 和 `ARM_NOT_READY/wire_id=272/273`。`/dev/i2c-5`
+  当时只由唯一的 `arm_controller` 进程打开，排除第二套用户态控制栈竞争。
+  这次是内核级长超时，不属于新增 5 ms 快速重试所处理的瞬态
+  `EAGAIN/EREMOTEIO`；其耗时必然超过流 watchdog，因此当前安全停车行为符合契约。
+- 2026-08-01 当前会话约 90 秒内 controller 累计 `44` 次 I2C 读取失败，启动阶段
+  先连续出现 `26` 次 `Errno 121` 才恢复。内核在 `01:51:23` 连续两次记录
+  `lost arbitration` 并随后记录 `controller timed out`，在 `01:51:44`、
+  `01:51:47` 和 `01:52:29～37` 又多次记录 `lost arbitration`；与 ROS 同期的
+  `Errno 121/110` 一致。这确认剩余问题位于 RDK DesignWare I2C/物理链路或 STM32
+  从机总线状态，不是 One Euro、Joy 或 ROS 状态解释造成。
+- 本轮已修复“两个短暂丢帧恰好吃满 300 ms 安装确认窗口”的固件竞态，但不会也
+  不应掩盖持续超过 watchdog 的真实总线中断。新 HEX 刷写后若仍出现单次约 1 秒
+  `controller timed out`，仍会安全停车；关闭该问题前必须检查 SDA/SCL 共地、线长、
+  上拉与供电，并在单控制栈下完成内核日志和 60 秒运动联合复测。
+- 2026-08-01 RDK controller 已增加同周期快速读重试：只对快速返回的
+  `EAGAIN/EREMOTEIO` 最多尝试 3 次、间隔 5 ms；`ETIMEDOUT` 不重试。重试后恢复
+  不增加连续失败计数，但单独累计并记录 `retry_total`；三次耗尽仍按原逻辑计为一次
+  轮询失败，连续失败阈值和安全锁止不变。三个新回归覆盖瞬态恢复、耗尽和长超时，
+  controller `64 passed`、action_pkg 完整回归 `113 passed、1 skipped`，本地两个
+  ROS 包构建通过。同日已同步至 RDK `/home/sunrise/Armbot`，RDK 构建通过，
+  包内回归同样为 `113 passed、1 skipped`；部署期间控制栈保持停止。覆盖前备份为
+  `/home/sunrise/Armbot-i2c-read-retry-pre-20260801-021140.tar.gz`，SHA-256 为
+  `156f5aee6555b528e9de5ee2fc39577a492830817dceaf54b9378f0af2e7df5b`。这些结果只证明
+  ROS 快速重试已部署，不证明底层 `lost arbitration/controller timed out` 已消失；
+  实机 60 秒运动验收仍待新 HEX 刷写后完成。
+- 2026-07-31 21:22:43～21:22:53，RDK 内核连续 11 次记录
+  `i2c_dw_handle_tx_abort: lost arbitration`。约两秒后，controller 连续下发的
+  `wire_id=1405/1406/1407` 均收到 `FW_ERROR_ARM_NOT_READY`，teleop 随即因
+  `STATE_ERROR` 禁用并要求 Home。该时间关系表明这三条 `error=3` 不是三次新故障，
+  而是密集 I2C 仲裁失败使 `T` 更新中断、固件流 watchdog 先行失效后的连续拒绝；
+  与 21:07 左右“新命令已 ACCEPTED 但慢 IK 超时”的独立软件缺陷不同。
+- 2026-07-31 20:59:29，v3 流式遥操在 `wire_id=436` 后约 1.15 秒没有新的
+  controller 状态日志；teleop 先因 0.5 秒无 `/arm/state` 丢失同步，随后 controller
+  的 I2C read 返回 `Errno 110 Connection timed out`。恢复读取时 STM32 已按 200 ms
+  watchdog 报 `lifecycle=FAILED/error=STREAM_TIMEOUT/wire_id=437`，下一条流式请求再报
+  `ARM_NOT_READY/wire_id=438`，ROS 最终保持 `STATE_ERROR/error_code=0x0021`。
+- 同一时窗 RDK 内核明确记录
+  `i2c_dw_handle_tx_abort: lost arbitration` 和 `controller timed out`；20:58:28～31
+  也出现同一组错误。`/dev/i2c-5` 只有 controller 的一个 fd，joy 只占用
+  `/dev/input/event1`，排除第二个用户态 I2C 进程竞争。旁路 `arm_state_filter` 只订阅
+  ROS 话题，不打开 I2C，不是本次总线仲裁错误来源。
+- 当前 `SMBus.i2c_rdwr()` 在 ROS 单线程 executor 内同步执行；一次内核级约 1 秒
+  timeout 会同时阻塞 10 Hz 状态发布和后续 `T` 下发。即使 STM32 随后恢复监听，
+  阻塞时间也已远超 200 ms 流式 watchdog，因此现有自动恢复只能恢复通信，不能避免
+  本次受控刹停和重新 Home。RDK 内核支持 `I2C_TIMEOUT=0x0702`（10 ms 单位），但
+  缩短适配器超时的兼容性和实际效果尚未验证，不能直接作为已完成修复。
 - 2026-07-14 23:24:53，单控制栈在 `sequence_id=885` 不变时再次开始持续
   `Errno 121`；失败计数一直增至 11914，23:44:49 板端恢复后立即读到
   `lifecycle=EXECUTING/error=0/wire_id=858` 和有效舵机反馈。该会话中 ROS 在第 5 次
@@ -1019,7 +1227,7 @@ Home 后机械臂实际 `y` 没有归零，但遥控节点仍可能记录
 
 ## P1：RDK X5 橙色状态灯熄灭且有线网络不可达
 
-状态：**已恢复，根因待确认；控制栈保持停止**
+状态：**网络不可达再次复现，根因待确认；当前无法读取控制栈与 ROS 日志**
 
 ### 现象与证据
 
@@ -1033,6 +1241,11 @@ Home 后机械臂实际 `y` 没有归零，但遥控节点仍可能记录
   `192.168.127.10` 成功，远端重新构建和 ROS 回归均通过。恢复时没有取得 Debug
   串口或上次启动日志，因此目前只能确认“已恢复”，不能把 SD 卡、欠压、异常关机
   或内核卡死中的任一项写成已确认根因。
+- 2026-07-31 One Euro 部署和远端测试成功后，用户启动实机操作并报告夹爪/腕转
+  卡顿；本次只读日志查询先持续无响应，随后 SSH 端口连接两次在 5 秒上限后超时，
+  对 `192.168.127.10` 的三次 ping 全部丢失。当前只能确认 RDK 再次网络不可达，
+  尚未取得橙灯、供电、内核或 Debug 串口证据，不能判断是整机卡死、链路掉线还是
+  其他原因。
 - RDK X5 官方硬件文档说明：绿色灯表示 5V 供电正常，3.1.0 及以后系统的橙色
   状态灯闪烁表示系统运行正常；供电要求为独立 `5V/5A`，不应使用电脑 USB
   接口供电：

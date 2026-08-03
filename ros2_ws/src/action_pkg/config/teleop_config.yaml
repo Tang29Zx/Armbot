@@ -16,7 +16,7 @@ arm_teleop_node:
     gripper_contact_stable_delta: 0.006
     gripper_contact_stable_samples: 3
     command_duration_sec: 0.09
-    stream_watchdog_sec: 0.20
+    stream_watchdog_sec: 0.30
     home_gripper_duration_sec: 1.0
     home_gripper_open_tolerance: 0.10
     home_wrist_roll_duration_sec: 1.0

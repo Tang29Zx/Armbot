@@ -13,8 +13,10 @@ or, from the workspace:
 Missing ROS2 dependencies are collection errors; CI cannot skip the suite.
 """
 
+import errno
 import math
 import struct
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from action_interfaces.msg import ArmCommand, ArmState
@@ -25,6 +27,7 @@ from action_pkg.arm_controller_node import (
     ERR_ESTOP_LATCHED,
     ERR_FW_MOTION_TIMEOUT,
     ERR_FW_NO_SOLVE,
+    ERR_FW_NOT_READY,
     ERR_FW_PROTOCOL,
     ERR_FW_RESTARTED,
     ERR_FW_SERVO_DEADLINE,
@@ -40,6 +43,7 @@ from action_pkg.arm_controller_node import (
     ERR_STALE_CMD,
     ERR_WRIST_ROLL_RANGE,
     FW_ERROR_MOTION_TIMEOUT,
+    FW_ERROR_ARM_NOT_READY,
     FW_ERROR_NO_IK_SOLUTION,
     FW_ERROR_SERVO_FEEDBACK_FAILED,
     FW_ERROR_SERVO_DEADLINE_MISSED,
@@ -54,7 +58,10 @@ from action_pkg.arm_controller_node import (
     I2C_FAIL_THRESHOLD,
     I2C_PROTOCOL_MAGIC,
     I2C_PROTOCOL_VERSION,
+    I2C_READ_ATTEMPTS,
+    I2C_READ_RETRY_DELAY_SEC,
 )
+import action_pkg.arm_controller_node as controller_module
 import pytest
 import rclpy
 from rclpy.parameter import Parameter
@@ -166,6 +173,102 @@ def test_wrist_roll_rejects_nonfinite_target(node):
 
     assert node._state == ArmState.STATE_ERROR
     assert node._error_code == ERR_NONFINITE_FIELD
+
+
+def test_wrist_roll_stream_uses_u_packet_with_raw_limits(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    cmd = _cmd(
+        ArmCommand.MODE_WRIST_ROLL_SERVO,
+        seq=1,
+        duration_sec=0.3,
+    )
+    cmd.joint_position[4] = math.pi / 2.0
+
+    node.handle_command(cmd)
+
+    packet = writes[-1]
+    assert packet[0] == ord('U')
+    assert packet[8] == 2
+    assert struct.unpack_from('<H', packet, 6)[0] == 300
+    assert struct.unpack_from('<f', packet, 12)[0] == pytest.approx(125.0)
+    assert struct.unpack_from('<f', packet, 16)[0] == pytest.approx(250.0)
+    assert struct.unpack_from('<f', packet, 20)[0] == pytest.approx(1000.0)
+
+
+def test_gripper_stream_sends_latest_target_before_g_end(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER_SERVO, seq=1,
+        gripper_position=0.2, duration_sec=0.3))
+    first_wire = node._active_wire_id
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER_SERVO, seq=2,
+        gripper_position=0.3, duration_sec=0.3))
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER_SERVO_END, seq=3))
+    assert [packet[0] for packet in writes] == [ord('U')]
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_EXECUTING, first_wire)
+    node.poll_status()
+    latest_wire = node._active_wire_id
+    assert node._active_seq == 2
+    assert [packet[0] for packet in writes] == [ord('U'), ord('U')]
+    assert writes[-1][8] == 1
+    assert struct.unpack_from('<f', writes[-1], 12)[0] == pytest.approx(350.0)
+    assert struct.unpack_from('<f', writes[-1], 16)[0] == pytest.approx(300.0)
+    assert struct.unpack_from('<f', writes[-1], 20)[0] == pytest.approx(1200.0)
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_EXECUTING, latest_wire)
+    node.poll_status()
+    end_wire = node._active_wire_id
+    assert node._active_seq == 3
+    assert [packet[0] for packet in writes] == [
+        ord('U'), ord('U'), ord('G')]
+    assert writes[-1][8] == 1
+    assert writes[-1][6:8] == bytes(2)
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_COMPLETED, end_wire)
+    node.poll_status()
+    assert node._stream_open is False
+    assert node._stream_open_family is None
+
+
+def test_wrist_stream_waits_for_gripper_end_completion(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER_SERVO, seq=1,
+        gripper_position=0.2, duration_sec=0.3))
+    gripper_wire = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_EXECUTING, gripper_wire)
+    node.poll_status()
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER_SERVO_END, seq=2))
+    end_wire = node._active_wire_id
+    wrist = _cmd(
+        ArmCommand.MODE_WRIST_ROLL_SERVO, seq=3,
+        duration_sec=0.3)
+    wrist.joint_position[4] = 0.1
+    node.handle_command(wrist)
+    assert [packet[0] for packet in writes] == [ord('U'), ord('G')]
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_EXECUTING, end_wire)
+    node.poll_status()
+    assert [packet[0] for packet in writes] == [ord('U'), ord('G')]
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_COMPLETED, end_wire)
+    node.poll_status()
+    assert [packet[0] for packet in writes] == [
+        ord('U'), ord('G'), ord('U')]
+    assert writes[-1][8] == 2
 
 
 def test_motion_rejected_until_v3_status_is_verified(node):
@@ -297,6 +400,24 @@ def test_stream_stopping_requires_home(node, firmware_error, expected_error):
     assert node._command_phase == ArmState.PHASE_STOPPING
     assert node._error_code == expected_error
     assert node._stream_open is False
+
+
+def test_arm_not_ready_error_is_published_immediately(node):
+    node.state_pub = MagicMock()
+    node.handle_command(_cmd(
+        ArmCommand.MODE_CARTESIAN_SERVO, seq=1,
+        x=15.0, y=0.1, z=2.0, pitch=-54.48, duration_sec=0.3))
+    wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_FAILED, wire_id, FW_ERROR_ARM_NOT_READY)
+
+    node.poll_status()
+
+    published = node.state_pub.publish.call_args_list[-1].args[0]
+    assert published.state == ArmState.STATE_ERROR
+    assert published.command_phase == ArmState.PHASE_FAILED
+    assert published.sequence_id == 1
+    assert published.error_code == ERR_FW_NOT_READY
 
 
 def test_end_effector_units_are_centimeters(node):
@@ -865,6 +986,73 @@ def test_stop_clears_queued_command(node):
 
 
 # ===================== sec 5.5 I2C failure threshold =====================
+def test_i2c_read_retries_remote_io_within_same_poll(node, monkeypatch):
+    packet = _status(FW_LIFECYCLE_EXECUTING, wire_id=7)
+    bus = MagicMock()
+    bus.i2c_rdwr.side_effect = [
+        OSError(errno.EREMOTEIO, 'lost arbitration'),
+        None,
+    ]
+    read = MagicMock(side_effect=[list(packet), list(packet)])
+    monkeypatch.setattr(
+        controller_module, 'i2c_msg', SimpleNamespace(read=read))
+    delays = []
+    monkeypatch.setattr(
+        controller_module.time, 'sleep', delays.append)
+    node.bus = bus
+
+    result = ArmControllerNode._i2c_read_status(node)
+
+    assert result == packet
+    assert bus.i2c_rdwr.call_count == 2
+    assert delays == [I2C_READ_RETRY_DELAY_SEC]
+    assert node._i2c_fail_count == 0
+    assert node._i2c_failure_total == 0
+    assert node._i2c_read_retry_total == 1
+
+
+def test_i2c_read_counts_exhausted_retries_as_one_poll_failure(
+        node, monkeypatch):
+    bus = MagicMock()
+    bus.i2c_rdwr.side_effect = OSError(
+        errno.EREMOTEIO, 'lost arbitration')
+    read = MagicMock(side_effect=[bytearray(32)] * I2C_READ_ATTEMPTS)
+    monkeypatch.setattr(
+        controller_module, 'i2c_msg', SimpleNamespace(read=read))
+    delays = []
+    monkeypatch.setattr(
+        controller_module.time, 'sleep', delays.append)
+    node.bus = bus
+
+    result = ArmControllerNode._i2c_read_status(node)
+
+    assert result is None
+    assert bus.i2c_rdwr.call_count == I2C_READ_ATTEMPTS
+    assert delays == [I2C_READ_RETRY_DELAY_SEC] * (
+        I2C_READ_ATTEMPTS - 1)
+    assert node._i2c_fail_count == 1
+    assert node._i2c_failure_total == 1
+
+
+def test_i2c_read_does_not_retry_kernel_timeout(node, monkeypatch):
+    bus = MagicMock()
+    bus.i2c_rdwr.side_effect = OSError(errno.ETIMEDOUT, 'timed out')
+    read = MagicMock(return_value=bytearray(32))
+    monkeypatch.setattr(
+        controller_module, 'i2c_msg', SimpleNamespace(read=read))
+    delays = []
+    monkeypatch.setattr(
+        controller_module.time, 'sleep', delays.append)
+    node.bus = bus
+
+    result = ArmControllerNode._i2c_read_status(node)
+
+    assert result is None
+    assert bus.i2c_rdwr.call_count == 1
+    assert delays == []
+    assert node._i2c_fail_count == 1
+
+
 def test_i2c_failure_threshold_latches_error(node):
     bus = __import__('unittest.mock', fromlist=['MagicMock']).MagicMock()
     bus.i2c_rdwr.side_effect = OSError('simulated bus error')

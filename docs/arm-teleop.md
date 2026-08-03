@@ -10,6 +10,7 @@
 /joy -> arm_teleop_node -> /arm/command -> arm_controller_node -> STM32
                     \-> /arm/emergency_stop
 /arm/state ---------/
+         \-> arm_state_filter_node -> /arm/state_filtered (VLA only)
 ```
 
 Shadow 模式只订阅 `/joy_sim`，只发布 `/arm/teleop_command` 和
@@ -54,6 +55,9 @@ Shadow 模式只订阅 `/joy_sim`，只发布 `/arm/teleop_command` 和
 - A 使能要求：输入新鲜、摇杆与扳机中立、坐标已同步、机械臂非
   `MOVING/ERROR/ESTOP`。
 - 再按 A 只停止发送新目标，不发送 STOP，且保留坐标同步。
+- 流式目标 watchdog 默认 `300 ms`。它为 10 Hz 状态轮询、匹配 `EXECUTING`
+  确认和下一条目标写入保留一个控制周期余量；超过该时间仍未收到新目标时，固件
+  仍按异常断流执行受控制动并要求重新 Home。
 - Joy 超时也不会发送 STOP，但会关闭遥控并使坐标失去同步；重新控制前必须
   执行回零。
 - 急停或锁存错误会使坐标失去同步。解除锁存后必须单独执行回零，回零成功后
@@ -62,9 +66,16 @@ Shadow 模式只订阅 `/joy_sim`，只发布 `/arm/teleop_command` 和
   舵机的笛卡尔 Home；任一阶段失败都不会继续下一阶段。若夹爪反馈已连续 3 帧处于
   安全开度（规范位置不超过 `0.10`），但打开动作仍未报告完成，遥操会先发送单夹爪
   `MODE_GRIPPER_STOP`，确认停止后再继续腕转 Home，避免卡在机械端点。
-- Xbox 遥控默认向 STM32 发送 `90 ms` 夹爪动作；RT 松开使用独立的单夹爪
-  `MODE_GRIPPER_STOP`，不再把可能滞后的反馈位置重新下发。未填写时长的旧调用者仍
-  使用兼容默认值 `1000 ms`。
+- Xbox 腕转和夹爪使用 `U/G` 单舵机滚动流：ROS 保持 `10 Hz` 绝对目标，STM32
+  以 `25 Hz/40 ms` 生成位置小段；默认 watchdog 为 `300 ms`。摇杆或扳机回中时
+  发送一次 `G`，平滑完成最后目标。夹爪接触检测仍用 `H` 立即停止 1 号舵机，
+  不会继续追赶接触前的目标。旧 `MODE_WRIST_ROLL`、`MODE_GRIPPER` 和 `P` 语义
+  保持不变，继续服务 Home、探针及非流式调用。
+- 真实控制 launch 同时启动只读 `arm_state_filter_node`。`/arm/state` 保持原始事实
+  来源，`/arm/state_filtered` 对五关节和夹爪执行 3 点因果中值与 One Euro 自适应
+  低通；默认参数为 `min_cutoff=1.0 Hz`、`beta=1.5`、导数截止频率 `1.0 Hz`，
+  时间戳间隔超过 `0.5 s` 时重新初始化。该话题只供 VLA observation 和记录器使用，
+  不参与遥控、安全门或完成判定。
 
 ## Shadow 模拟
 
