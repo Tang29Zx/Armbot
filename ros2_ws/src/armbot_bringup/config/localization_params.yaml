@@ -36,8 +36,6 @@ slam_toolbox:
     enable_update_loop_closure: false
     use_scan_matching: true
     use_scan_barycenter: true
-    minimum_travel_distance: 0.1
-    minimum_travel_heading: 0.3
 
     # --- Publishers ---
     publish_map: false   # map comes from map_server, not localization

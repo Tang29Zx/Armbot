@@ -45,8 +45,6 @@ slam_toolbox:
     enable_update_loop_closure: true
     use_scan_matching: true
     use_scan_barycenter: true
-    minimum_travel_distance: 0.3
-    minimum_travel_heading: 0.5
 
     # --- Publishers ---
     publish_map: true

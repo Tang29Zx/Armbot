@@ -4,8 +4,7 @@ Base robot bringup — chassis + LiDAR + robot_state_publisher.
 Launches:
   - chassis_control      (I2C motor driver + odometry)
   - LiDAR driver         (/scan)
-  - robot_state_publisher (URDF -> tf)
-  - static tf publishers (base_link -> base_lidar_link -> laser)
+  - robot_state_publisher (URDF -> all tf including base_link -> laser)
 
 Usage:
   ros2 launch armbot_bringup robot.launch.py
@@ -42,15 +41,11 @@ def generate_launch_description():
         'lidar_port', default_value='/dev/ttyUSB0',
         description='LiDAR serial port')
     lidar_baud_arg = DeclareLaunchArgument(
-        'lidar_baudrate', default_value='115200',
+        'lidar_baudrate', default_value='230400',
         description='LiDAR baud rate')
-        lidar_motor_arg = DeclareLaunchArgument(
-            'lidar_motor_hz', default_value='8.0',
-            description='LiDAR motor frequency (Hz)')
-    use_arm_arg = DeclareLaunchArgument(
-        'use_arm', default_value='false',
-        description='Also launch arm controller')
-
+    lidar_motor_arg = DeclareLaunchArgument(
+        'lidar_motor_hz', default_value='8.0',
+        description='LiDAR motor frequency (Hz)')
     # ── URDF: use xacro to process the model description ──
     # Falls back to reading the raw .xacro if xacro is not installed
     # (robot_state_publisher in Humble can parse simple xacro without macros).
@@ -69,32 +64,9 @@ def generate_launch_description():
         }],
     )
 
-    # ── Static TF: base_link -> base_lidar_link ──
-    # LiDAR mounting height above ground (base_link is at ground level)
-    static_tf_lidar = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_tf_base_lidar',
-        arguments=[
-            '0', '0', '0.15',   # x y z
-            '0', '0', '0',      # roll pitch yaw
-            'base_link',
-            'base_lidar_link',
-        ],
-    )
-
-    # ── Static TF: base_lidar_link -> laser ──
-    static_tf_laser = Node(
-        package='tf2_ros',
-        executable='static_transform_publisher',
-        name='static_tf_lidar_laser',
-        arguments=[
-            '0', '0', '0.03',   # x y z (small offset above mounting plate)
-            '0', '0', '0',
-            'base_lidar_link',
-            'laser',
-        ],
-    )
+    # Static TF for base_link -> laser is handled by the URDF fixed joints
+    # (base_lidar_joint + laser_joint) via robot_state_publisher.
+    # No manual static_transform_publisher needed.
 
     # ── Chassis control ──
     chassis_launch = IncludeLaunchDescription(
@@ -124,18 +96,6 @@ def generate_launch_description():
         }.items(),
     )
 
-    # ── Arm controller (optional) ──
-    arm_launch = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource([
-            PathJoinSubstitution([
-                FindPackageShare('action_pkg'),
-                'launch',
-                'arm_control.launch.py',
-            ])
-        ]),
-        condition=None,  # TODO: condition on use_arm
-    )
-
     # ── Compose ──
     # TimerAction delays the LiDAR by 1s so the chassis I2C bus is ready first.
     # The chassis_control node uses I2C bus 5 (0x34) and the LiDAR uses serial,
@@ -145,9 +105,6 @@ def generate_launch_description():
         lidar_port_arg,
         lidar_baud_arg,
         lidar_motor_arg,
-        use_arm_arg,
-        static_tf_lidar,
-        static_tf_laser,
         robot_state_pub,
         chassis_launch,
         TimerAction(
