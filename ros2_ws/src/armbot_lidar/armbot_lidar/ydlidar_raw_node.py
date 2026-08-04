@@ -37,12 +37,13 @@ class YDLidarRawNode(Node):
         super().__init__('ydlidar_raw_node')
 
         self.declare_parameter('port', '/dev/ttyUSB0')
-        self.declare_parameter('baudrate', 115200)
+        self.declare_parameter('baudrate', 230400)
         self.declare_parameter('frame_id', 'laser')
         self.declare_parameter('range_min', 0.05)
         self.declare_parameter('range_max', 12.0)
         self.declare_parameter('motor_hz', 8.0)
         self.declare_parameter('samp_rate', 4)
+        self.declare_parameter('dump_scan', False)
 
         self.port      = self.get_parameter('port').value
         self.baud      = self.get_parameter('baudrate').value
@@ -189,7 +190,7 @@ class YDLidarRawNode(Node):
 
         self.scan_pub.publish(msg)
 
-        if n > 20:
+        if n > 20 and self.get_parameter('dump_scan').value:
             import json, os
             msg.angle_min = float(amin)
             msg.angle_max = float(amax)
