@@ -90,33 +90,54 @@ controller_server:
       yaw_goal_tolerance: 0.25
       stateful: true
 
-    # --- FollowPath (Regulated Pure Pursuit) ---
-    # For mecanum holonomic mode, use DWB controller instead (see comments at bottom).
+    # --- FollowPath (DWB — Dynamic Window Approach) ---
+    # DWB samples velocity space (vx, vy, wz) and scores each trajectory
+    # against costmap obstacles. With vy enabled, the mecanum chassis can
+    # strafe sideways to avoid obstacles instead of stopping to rotate.
     FollowPath:
-      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      desired_linear_vel: 0.25
-      lookahead_dist: 0.4
-      min_lookahead_dist: 0.3
-      max_lookahead_dist: 0.9
-      lookahead_time: 1.5
-      rotate_to_heading_angular_vel: 1.0
+      plugin: "dwb_core::DWBLocalPlanner"
+      debug_trajectory_details: false
+      min_vel_x: 0.0
+      min_vel_y: -0.15
+      max_vel_x: 0.25
+      max_vel_y: 0.15
+      max_vel_theta: 0.8
+      min_speed_xy: 0.0
+      max_speed_xy: 0.25
+      min_speed_theta: 0.0
+      acc_lim_x: 0.5
+      acc_lim_y: 0.3
+      acc_lim_theta: 1.5
+      decel_lim_x: -0.5
+      decel_lim_y: -0.3
+      decel_lim_theta: -1.5
+      vx_samples: 10
+      vy_samples: 5                 # enable mecanum lateral motion
+      vtheta_samples: 20
+      sim_time: 1.7
+      linear_granularity: 0.05
+      angular_granularity: 0.025
       transform_tolerance: 0.2
-      use_velocity_scaled_lookahead_dist: true
-      min_approach_linear_velocity: 0.05
-      approach_velocity_scaling_dist: 1.0
-      use_collision_detection: true
-      max_allowed_time_to_collision_up_to_carrot: 1.0
-      use_regulated_linear_velocity_scaling: true
-      use_cost_regulated_linear_velocity_scaling: false
-      regulated_linear_scaling_min_radius: 0.9
-      regulated_linear_scaling_min_speed: 0.1
-      use_fixed_curvature_lookahead: false
-      curvature_lookahead_dist: 0.5
-      use_rotate_to_heading: true
-      allow_reversing: false
-      rotate_to_heading_min_angle: 0.785
-      max_angular_accel: 3.2
-      max_robot_pose_search_dist: 10.0
+      xy_goal_tolerance: 0.15
+      yaw_goal_tolerance: 0.25
+      trans_stopped_velocity: 0.01
+      rot_stopped_velocity: 0.01
+      short_circuit_trajectory_evaluation: true
+      stateful: true
+      critics:
+        - "dwb_critics::BaseObstacle"     # reactive obstacle avoidance
+        - "dwb_critics::GoalAlign"
+        - "dwb_critics::GoalDist"
+        - "dwb_critics::PathAlign"
+        - "dwb_critics::PathDist"
+        - "dwb_critics::PreferForward"
+      BaseObstacle.scale: 1.0
+      GoalAlign.scale: 24.0
+      GoalAlign.forward_point_distance: 0.325
+      GoalDist.scale: 24.0
+      PathAlign.scale: 32.0
+      PathDist.scale: 32.0
+      PreferForward.scale: 0.1
 
 # =============================================================================
 # Planner Server
@@ -235,10 +256,10 @@ velocity_smoother:
     smoothing_frequency: 20.0
     scale_velocities: false
     feedback: "OPEN_LOOP"
-    max_velocity: [0.3, 0.0, 1.0]       # [vx, vy, wz]
-    min_velocity: [-0.3, 0.0, -1.0]
-    max_accel: [0.5, 0.0, 1.5]
-    max_decel: [0.5, 0.0, 1.5]
+    max_velocity: [0.3, 0.15, 1.0]       # [vx, vy, wz] — vy enabled for mecanum
+    min_velocity: [-0.3, -0.15, -1.0]
+    max_accel: [0.5, 0.3, 1.5]
+    max_decel: [0.5, 0.3, 1.5]
     odom_topic: /odom
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
@@ -342,56 +363,3 @@ local_costmap:
       cost_scaling_factor: 5.0
 
 
-# =============================================================================
-# DWB Controller (Alternative for Mecanum Holonomic Drive)
-# =============================================================================
-# Uncomment and switch controller_plugins to use DWB instead of RPP.
-# DWB supports omnidirectional motion (vx + vy simultaneously), which
-# is ideal for mecanum-wheel robots. It is heavier on CPU — test on
-# RDK X5 before switching.
-#
-# To use: set controller_server.ros__parameters.controller_plugins to
-# ["FollowPath"] and remove/comment the RPP FollowPath block above.
-#
-# FollowPath:
-#   plugin: "dwb_core::DWBLocalPlanner"
-#   debug_trajectory_details: true
-#   min_vel_x: -0.3
-#   min_vel_y: 0.0
-#   max_vel_x: 0.3
-#   max_vel_y: 0.0
-#   max_vel_theta: 1.0
-#   min_speed_xy: 0.0
-#   max_speed_xy: 0.3
-#   min_speed_theta: 0.0
-#   acc_lim_x: 0.5
-#   acc_lim_y: 0.5
-#   acc_lim_theta: 1.5
-#   decel_lim_x: -0.5
-#   decel_lim_y: -0.5
-#   decel_lim_theta: -1.5
-#   vx_samples: 10
-#   vy_samples: 0
-#   vtheta_samples: 20
-#   sim_time: 1.7
-#   linear_granularity: 0.05
-#   angular_granularity: 0.025
-#   transform_tolerance: 0.2
-#   xy_goal_tolerance: 0.15
-#   trans_stopped_velocity: 0.01
-#   short_circuit_trajectory_evaluation: true
-#   stateful: true
-#   critics:
-#     - "dwb_critics::BaseObstacle"
-#     - "dwb_critics::GoalAlign"
-#     - "dwb_critics::GoalDist"
-#     - "dwb_critics::PathAlign"
-#     - "dwb_critics::PathDist"
-#     - "dwb_critics::PreferForward"
-#   BaseObstacle.scale: 1.0
-#   GoalAlign.scale: 24.0
-#   GoalAlign.forward_point_distance: 0.325
-#   GoalDist.scale: 24.0
-#   PathAlign.scale: 32.0
-#   PathDist.scale: 32.0
-#   PreferForward.scale: 0.1
