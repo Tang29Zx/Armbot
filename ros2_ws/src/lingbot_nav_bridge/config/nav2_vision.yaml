@@ -1,0 +1,117 @@
+# Nav2 configuration for visual SLAM (lingbot-map bridge)
+# Minimal setup: global plan from /map, local avoidance from costmap
+
+/**:
+  ros__parameters:
+    use_sim_time: false
+
+# ── Controller Server ─────────────────────────────────────────────
+controller_server:
+  ros__parameters:
+    controller_frequency: 20.0
+    min_x_velocity_threshold: 0.001
+    controller_plugin_ids: ["FollowPath"]
+    FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.25
+      max_linear_vel: 0.35
+      min_linear_vel: 0.05
+      lookahead_dist: 0.5
+      max_lookahead_dist: 1.0
+      min_lookahead_dist: 0.3
+      transform_tolerance: 0.5
+
+# ── Planner Server ────────────────────────────────────────────────
+planner_server:
+  ros__parameters:
+    planner_plugin_ids: ["GridBased"]
+    GridBased:
+      plugin: "nav2_navfn_planner::NavfnPlanner"
+      tolerance: 0.5
+      use_astar: false
+      allow_unknown: true
+
+# ── Behavior Server ───────────────────────────────────────────────
+behavior_server:
+  ros__parameters:
+    local_costmap_topic: /local_costmap/costmap_raw
+    global_costmap_topic: /global_costmap/costmap_raw
+    cycle_frequency: 10.0
+    behavior_plugins: ["spin", "backup", "wait"]
+    spin:
+      plugin: "nav2_behaviors::Spin"
+    backup:
+      plugin: "nav2_behaviors::BackUp"
+    wait:
+      plugin: "nav2_behaviors::Wait"
+
+# ── BT Navigator ──────────────────────────────────────────────────
+bt_navigator:
+  ros__parameters:
+    global_frame: map
+    robot_base_frame: base_link
+    default_bt_xml_filename: "navigate_to_pose_w_replanning_and_recovery.xml"
+    transform_tolerance: 0.5
+
+# ── Global Costmap ────────────────────────────────────────────────
+global_costmap:
+  global_costmap:
+    ros__parameters:
+      update_frequency: 2.0
+      publish_frequency: 1.0
+      global_frame: map
+      robot_base_frame: base_link
+      rolling_window: false
+      width: 200
+      height: 200
+      resolution: 0.05
+      track_unknown_space: true
+      always_send_full_costmap: true
+      plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
+      static_layer:
+        plugin: "nav2_costmap_2d::StaticLayer"
+        map_subscribe_transient_local: true
+        subscribe_to_updates: true
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        observation_sources: "scan"
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.3
+        cost_scaling_factor: 3.0
+
+# ── Local Costmap ─────────────────────────────────────────────────
+local_costmap:
+  local_costmap:
+    ros__parameters:
+      update_frequency: 5.0
+      publish_frequency: 2.0
+      global_frame: odom
+      robot_base_frame: base_link
+      rolling_window: true
+      width: 3
+      height: 3
+      resolution: 0.05
+      plugins: ["obstacle_layer", "inflation_layer"]
+      obstacle_layer:
+        plugin: "nav2_costmap_2d::ObstacleLayer"
+        observation_sources: "scan"
+        scan:
+          topic: /scan
+          max_obstacle_height: 2.0
+          clearing: true
+          marking: true
+      inflation_layer:
+        plugin: "nav2_costmap_2d::InflationLayer"
+        inflation_radius: 0.25
+        cost_scaling_factor: 5.0
+
+# ── Waypoint Follower ─────────────────────────────────────────────
+waypoint_follower:
+  ros__parameters:
+    stop_on_failure: false
