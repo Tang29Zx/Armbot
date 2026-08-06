@@ -48,6 +48,32 @@
 
 ## 已验证记录
 
+- 2026-08-07：本轮定点药盒抓取 61 条原始 episode 已完成统一 QC 和 OpenPI/LeRobot
+  v2.1 转换。外部处理清单覆盖全部数据：28 条 `success_usable`、14 条
+  `success_crop`、16 条 `discard`、3 条 `out_of_scope`；正式训练集共 42 episodes、
+  15,625 帧，位于
+  `/home/tang/Projects/armbot/vla_data/lerobot/local/armbot_pi05_fixed_pick_42`。所有输出
+  PNG 均严格解码为 RGB 224×224，状态/动作均有限且索引连续；OpenPI 锁定的 LeRobot
+  commit `0cf864870cf29f4738d3ade893e6fd13fbd7cdb5` 已按标准缓存布局读回 image
+  `[3,224,224]`、state `[6]`、10 步 action chunk `[10,6]`。一张落入训练窗口的截断
+  JPEG 已按内容 SHA-256 精确剔除并因果回退到前一正常帧；其余 9 张原始轻微截断 JPEG
+  均在训练窗口之外。原始数据全量组合 SHA-256 在转换前后保持
+  `00c5ab449b17de1e7372219bc7c51091b2bb0aa08fbe74fd20eed03489690e91`。
+
+- 2026-08-06：`vla_dataset` 新增显式人工 review 和只读 rosbag2 → OpenPI 固定
+  LeRobot v2.1 转换器。v1 协议固定为 10 Hz：状态为 5 关节 rad + 绝对夹爪，动作
+  为 XYZ cm/pitch deg/wrist rad 的下一控制周期目标增量 + 绝对夹爪；图像按比例补边
+  到 224×224。转换要求普通命令具有固件 `EXECUTING/COMPLETED` 回执；短间隔流式
+  目标可按 controller 最新目标队列语义被同族后继覆盖，但必须在 1 秒内由已确认目标
+  或结束/停止命令收束。孤立无效状态可因果回退到最近有效状态（正常 150 ms 上限
+  外额外容许一个采样周期）并写入报告，连续无效/过期状态、错误、急停和坏包仍会拒绝。最新 episode 实际导出
+  358 帧/35.7 秒，
+  OpenPI 锁定的 LeRobot loader 读回为 image `[3,224,224]`、state `[6]`、10 步
+  action chunk `[10,6]`，全部有限；输出位于本机
+  `/home/tang/Projects/armbot/vla_data/lerobot/armbot_pi05_smoke`。相机 header 到 bag
+  到达延迟 p50 约 303 ms，因此默认按 bag 到达时间因果对齐并把延迟写入转换报告。
+  该 episode 仍为 `unreviewed`，烟雾导出不代表训练放行。
+
 - 2026-08-04：本机 SSH 新增 `Host rdk`，目标为 `sunrise@192.168.3.147`，固定使用
   `~/.ssh/id_ed25519_rdk_armbot`，并以 `ProxyCommand none` 绕过系统级 SOCKS 代理。
   `ssh -G rdk` 已确认解析正确；新地址 TCP/22 已可达，在线读取到的 RSA、ECDSA、

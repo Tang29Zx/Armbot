@@ -83,8 +83,8 @@ RDK X5 VLA bridge（待实现）
 | OpenPI Python 环境 | 已完成、GPU 已验证 | JAX 0.5.3 和 PyTorch 2.7.1+cu128 均已完成 RTX 5070 Ti 实际运算 |
 | 模型权重 | 未下载 | 首次启动 policy server 时按需下载 |
 | ROS 2 Humble | 当前 WSL 未安装 | 因此本机还没有完成 `colcon build/test` |
-| Armbot VLA policy adapter | 待实现 | 尚无相机/状态字段映射和动作解码器 |
-| LeRobot 数据采集器 | 待实现 | 尚无同步 episode recorder 和转换脚本 |
+| Armbot VLA policy adapter | 待实现 | 数据字段已冻结，尚无 OpenPI Inputs/Outputs 和动作下发器 |
+| LeRobot 数据链路 | 已实现、待批量实采 | rosbag2 recorder、人工 review 和离线 LeRobot v2.1 转换器已完成 |
 | Armbot 微调配置 | 待实现 | 尚无 `TrainConfig`、数据配置和 norm stats |
 | VLA ROS2 bridge | 待实现 | 尚无 policy client、action chunk 调度和模型输出安全层 |
 
@@ -369,34 +369,43 @@ frame_index                  episode 内帧编号
 
 建议的初始采样频率为 10 Hz，与当前 `/arm/state` 发布频率一致。每个 episode 必须有清晰的开始、成功、失败和人工中止边界，不能把不同任务或复位过程拼接成一个 episode。
 
-### 7.1 尚未冻结的状态和动作表示
+### 7.1 v1 状态和动作表示
 
-当前可获得的状态候选为：
+OpenPI/LeRobot v1 数据协议固定为 10 Hz：
 
 ```text
-[joint_1, joint_2, joint_3, joint_4, joint_5, gripper]
+observation.state =
+  [joint_1_rad, joint_2_rad, joint_3_rad, joint_4_rad, joint_5_rad,
+   gripper_absolute]
+
+action =
+  [delta_x_cm, delta_y_cm, delta_z_cm, delta_pitch_deg,
+   delta_wrist_roll_rad, gripper_absolute]
 ```
 
-其中 5 个关节使用 rad，夹爪使用 `[0, 1]`。但夹爪目前不是真实反馈，关节 feedback 也缺少合理性校验，因此该状态还不能直接作为可信训练数据。
-
-动作表示尚未冻结：
-
-- 关节增量动作适合稳定的闭环控制，但必须先实现并验证 `MODE_JOINT`；
-- 末端笛卡尔动作可使用现有固件 IK，但当前没有可靠的末端位姿反馈和完整 FK 标定；
-- 两种动作不能混入同一个训练配置。
-
-在确定动作表示之前不得开始大规模采集，否则数据可能无法用于训练。
+状态的 5 个关节使用 rad，夹爪使用 `[0, 1]`。动作前 5 维是下一个 100 ms
+控制区间内“保持目标”的变化量，夹爪始终是绝对目标。转换器不把 ROS 的 mode/end/
+stop 事件直接作为模型动作；它先重建各控制维度的保持目标，再生成固定维度 action。
+该协议只适用于当前笛卡尔控制配置，不能与关节位置或关节速度 action 混用。
 
 ### 7.2 数据同步规则
 
-待实现 recorder 必须：
+recorder 和转换器执行以下规则：
 
 1. 以同一单调时钟记录图像、状态、实际下发动作和任务文本；
-2. 拒绝 `position_valid=false` 或状态超时的样本；
-3. 保存“实际执行动作”，不能只保存模型或操作者请求值；
+2. 孤立的 `position_valid=false` 样本可因果回退到最近有效状态，额外容许一个采样
+   周期；连续无效或超过回退年龄限制时仍拒绝转换，并在报告中记录无效消息与回退帧数；
+3. 普通命令必须有匹配的 `EXECUTING/COMPLETED` 固件生命周期；流式目标允许被短间隔
+   同族目标覆盖，但替换链必须在 1 秒内由已确认目标或结束/停止命令收束；
 4. 记录急停、通信错误和 episode 终止原因；
 5. 数据集只保存必要传感器数据，不提交到 Git；
-6. 转换后先可视化抽查，再上传训练服务器。
+6. `unreviewed` 只允许烟雾测试转换，正式训练只接收人工标记为 `success` 的 episode；
+7. 转换后先可视化抽查，再上传训练服务器。
+
+当前相机 header 到 rosbag 到达时间实测约为 303 ms。转换器默认按 rosbag 到达时间
+做因果对齐，使训练观测与未来 RDK policy client 实际收到的消息时序一致，同时在
+`meta/armbot_conversion.json` 保存 header-to-bag 延迟统计。若相机链路发生变化，必须
+重新测量，不能沿用旧延迟假设。
 
 ## 8. 微调方案
 
@@ -514,8 +523,8 @@ ros2 interface show action_interfaces/msg/ArmState
 3. 架空确认舵机 ID、方向、零位、限位和 STOP 语义；
 4. 实现并验证关节动作，或明确选择并完成笛卡尔动作闭环；
 5. 下载官方模型并完成 dummy inference；
-6. 冻结 observation/action 数据契约；
-7. 实现 LeRobot recorder、转换和数据可视化；
+6. observation/action 数据契约已冻结为 10 Hz 笛卡尔增量 v1；
+7. rosbag2 recorder、人工 review 和 LeRobot 转换已实现；继续补数据可视化；
 8. 新增 Armbot policy adapter、数据配置和 LoRA 训练配置；
 9. 在服务器完成短训练、评估和 checkpoint 回传；
 10. 实现 RDK VLA bridge，按 shadow mode 到低速闭环的顺序上线。
