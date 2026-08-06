@@ -6,7 +6,11 @@ import time
 from unittest.mock import MagicMock
 
 from action_interfaces.msg import ArmCommand, ArmState
-from action_pkg.arm_teleop_node import ArmTeleopNode, ERR_FW_NO_SOLVE
+from action_pkg.arm_teleop_node import (
+    ArmTeleopNode,
+    ERR_FW_NO_SOLVE,
+    ERR_FW_STREAM_STEP_TOO_LARGE,
+)
 import pytest
 import rclpy
 from rclpy.parameter import Parameter
@@ -35,7 +39,7 @@ def shadow_node(tmp_path, monkeypatch):
     rclpy.shutdown()
 
 
-def test_a_is_edge_triggered_and_requires_neutral(shadow_node):
+def test_a_is_edge_triggered_and_allows_active_controls(shadow_node):
     pressed = [0] * 16
     pressed[0] = 1
     shadow_node._joy_callback(_joy(buttons=pressed))
@@ -51,7 +55,44 @@ def test_a_is_edge_triggered_and_requires_neutral(shadow_node):
     assert shadow_node._synced
     shadow_node._joy_callback(_joy(axes=deflected))
     shadow_node._joy_callback(_joy(axes=deflected, buttons=pressed))
-    assert shadow_node._enabled is False
+    assert shadow_node._enabled
+
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    command = shadow_node._command_pub.publish.call_args.args[0]
+    assert command.mode == ArmCommand.MODE_CARTESIAN_SERVO
+
+
+def test_uninitialized_trigger_zero_is_neutral_until_release(shadow_node):
+    shadow_node._enabled = True
+    uninitialized = [0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0]
+
+    shadow_node._joy_callback(_joy(axes=uninitialized))
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+
+    shadow_node._command_pub.publish.assert_not_called()
+    assert shadow_node._trigger_ready == [True, False]
+    assert shadow_node._axes[5] == 1.0
+
+    shadow_node._joy_callback(_joy())
+    assert shadow_node._trigger_ready == [True, True]
+    shadow_node._joy_callback(_joy(axes=uninitialized))
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+
+    command = shadow_node._command_pub.publish.call_args.args[0]
+    assert command.mode == ArmCommand.MODE_GRIPPER_SERVO
+
+
+def test_joy_timeout_rearms_trigger_initialization(shadow_node):
+    shadow_node._joy_callback(_joy())
+    assert shadow_node._trigger_ready == [True, True]
+
+    shadow_node._last_joy_time = time.monotonic() - 1.0
+    shadow_node._check_timeouts(time.monotonic())
+
+    assert shadow_node._trigger_ready == [False, False]
 
 
 def test_reset_chord_requires_full_hold(shadow_node):
@@ -141,6 +182,31 @@ def test_arm_stream_sends_one_end_when_stick_returns_to_center(shadow_node):
     assert stream.duration_sec == pytest.approx(0.30)
 
 
+def test_gripper_input_preempts_active_arm_stream(shadow_node):
+    shadow_node._enabled = True
+    shadow_node._joy_valid = True
+    shadow_node._axes = [0.0, 1.0, 0.0, 0.0, 1.0, 1.0]
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    assert shadow_node._command_pub.publish.call_args.args[0].mode == (
+        ArmCommand.MODE_CARTESIAN_SERVO)
+
+    shadow_node._command_pub.reset_mock()
+    shadow_node._axes[4] = -1.0
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    assert shadow_node._command_pub.publish.call_args.args[0].mode == (
+        ArmCommand.MODE_CARTESIAN_SERVO_END)
+
+    shadow_node._command_pub.reset_mock()
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    command = shadow_node._command_pub.publish.call_args.args[0]
+    assert command.mode == ArmCommand.MODE_GRIPPER_SERVO
+    assert command.gripper_position > 0.0
+    assert command.duration_sec == pytest.approx(0.30)
+
+
 def test_right_stick_horizontal_publishes_wrist_roll(shadow_node):
     shadow_node._enabled = True
     shadow_node._joy_valid = True
@@ -176,6 +242,98 @@ def test_wrist_stream_sends_one_end_at_center(shadow_node):
         ArmCommand.MODE_WRIST_ROLL_SERVO,
         ArmCommand.MODE_WRIST_ROLL_SERVO_END,
     ]
+
+
+def test_gripper_stream_is_limited_from_last_confirmed_target(shadow_node):
+    shadow_node._enabled = True
+    shadow_node._joy_valid = True
+    shadow_node._axes = [0.0, 0.0, 0.0, 0.0, -1.0, 1.0]
+
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    first = shadow_node._command_pub.publish.call_args.args[0]
+    assert first.gripper_position == pytest.approx(0.05, abs=0.002)
+
+    # Do not acknowledge the first target.  Even after several delayed ticks,
+    # the queued replacement must remain within 9 degrees (0.075 normalized)
+    # of the last firmware-confirmed target.
+    for _ in range(3):
+        shadow_node._last_tick = time.monotonic() - 0.5
+        shadow_node._control_tick()
+    limited = shadow_node._command_pub.publish.call_args.args[0]
+    assert limited.gripper_position == pytest.approx(0.075)
+
+    state = ArmState()
+    state.state = ArmState.STATE_MOVING
+    state.command_phase = ArmState.PHASE_EXECUTING
+    state.sequence_id = limited.sequence_id
+    state.position_valid = True
+    state.gripper_position = 0.0
+    shadow_node._state_callback(state)
+
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    advanced = shadow_node._command_pub.publish.call_args.args[0]
+    assert advanced.gripper_position == pytest.approx(0.125, abs=0.002)
+
+
+def test_wrist_stream_is_limited_from_last_confirmed_target(shadow_node):
+    shadow_node._enabled = True
+    shadow_node._joy_valid = True
+    shadow_node._axes = [0.0, 0.0, 1.0, 0.0, 1.0, 1.0]
+
+    for _ in range(4):
+        shadow_node._last_tick = time.monotonic() - 0.5
+        shadow_node._control_tick()
+
+    limited = shadow_node._command_pub.publish.call_args.args[0]
+    assert limited.joint_position[4] == pytest.approx(math.radians(9.0))
+
+
+def test_direct_rejection_rolls_back_and_sends_one_halt(shadow_node):
+    shadow_node._enabled = True
+    shadow_node._joy_valid = True
+    shadow_node._axes = [0.0, 0.0, 0.0, 0.0, -1.0, 1.0]
+
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    accepted = shadow_node._command_pub.publish.call_args.args[0]
+
+    state = ArmState()
+    state.state = ArmState.STATE_MOVING
+    state.command_phase = ArmState.PHASE_EXECUTING
+    state.sequence_id = accepted.sequence_id
+    state.position_valid = True
+    state.gripper_position = 0.0
+    shadow_node._state_callback(state)
+    accepted_target = accepted.gripper_position
+
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    rejected = shadow_node._command_pub.publish.call_args.args[0]
+    assert rejected.gripper_position > accepted_target
+    shadow_node._command_pub.reset_mock()
+
+    state.state = ArmState.STATE_IDLE
+    state.command_phase = ArmState.PHASE_FAILED
+    state.sequence_id = rejected.sequence_id
+    state.error_code = ERR_FW_STREAM_STEP_TOO_LARGE
+    shadow_node._state_callback(state)
+
+    stopped = shadow_node._command_pub.publish.call_args.args[0]
+    assert stopped.mode == ArmCommand.MODE_GRIPPER_STOP
+    assert shadow_node._command_pub.publish.call_count == 1
+    assert shadow_node._target.gripper == pytest.approx(accepted_target)
+    assert shadow_node._direct_targets_by_seq == {}
+    assert shadow_node._enabled is False
+    assert shadow_node._no_ik_waiting_neutral
+
+    # A repeated state sample for the same rejected sequence must not emit a
+    # duplicate halt, and held input cannot continue the U stream while paused.
+    shadow_node._state_callback(state)
+    shadow_node._last_tick = time.monotonic() - 0.1
+    shadow_node._control_tick()
+    assert shadow_node._command_pub.publish.call_count == 1
 
 
 def test_rb_modifies_right_stick_horizontal_to_cartesian_pitch(shadow_node):
@@ -262,7 +420,8 @@ def test_no_ik_rolls_back_and_resumes_after_neutral(shadow_node):
     assert not shadow_node._no_ik_waiting_neutral
 
 
-def test_real_startup_syncs_after_three_home_samples(tmp_path, monkeypatch):
+def test_real_startup_requires_explicit_home_despite_home_pose(
+        tmp_path, monkeypatch):
     monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
     rclpy.init()
     node = ArmTeleopNode()
@@ -279,8 +438,13 @@ def test_real_startup_syncs_after_three_home_samples(tmp_path, monkeypatch):
     state.gripper_position = 0.1
     for _ in range(3):
         node._state_callback(state)
-    assert node._synced
+    node._joy_valid = True
+    node._last_joy_time = time.monotonic()
+
+    assert node._synced is False
     assert node._target.gripper == pytest.approx(0.1)
+    assert node._enable_block_reason(time.monotonic()) == (
+        'target is not synchronized; run home first')
     node.destroy_node()
     rclpy.shutdown()
 
@@ -405,18 +569,21 @@ def test_releasing_close_trigger_stops_without_feedback_hold(
     node._state_callback(state)
 
     node._joy_callback(_joy())
-    end = node._command_pub.publish.call_args.args[0]
-    assert end.mode == ArmCommand.MODE_GRIPPER_SERVO_END
+    stopped = node._command_pub.publish.call_args.args[0]
+    assert stopped.mode == ArmCommand.MODE_GRIPPER_STOP
     assert node._target.gripper == pytest.approx(close_target)
-    assert node._gripper_stop_pending_seq is None
+    assert node._gripper_stop_pending_seq == stopped.sequence_id
 
     node._command_pub.reset_mock()
+    state.sequence_id = stopped.sequence_id
+    state.state = ArmState.STATE_SUCCEEDED
     state.gripper_position = 0.32
     node._state_callback(state)
     node._state_callback(state)
 
     node._command_pub.publish.assert_not_called()
     assert node._target.gripper == pytest.approx(0.32)
+    assert node._gripper_stop_pending_seq is None
 
     node._axes[1] = 1.0
     node._last_tick = time.monotonic() - 0.1
@@ -477,6 +644,100 @@ def test_explicit_home_requires_three_valid_feedback_samples(
 
     assert node._synced is True
     assert node._enable_block_reason(time.monotonic()) == ''
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+def test_enable_reports_home_in_progress_before_unsynchronized(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    rclpy.init()
+    node = ArmTeleopNode()
+    node._command_pub = MagicMock()
+
+    state = ArmState()
+    state.state = ArmState.STATE_IDLE
+    node._state_callback(state)
+    node._request_home()
+    node._joy_valid = True
+    node._last_joy_time = time.monotonic()
+
+    assert node._synced is False
+    assert node._enable_block_reason(time.monotonic()) == (
+        'home/reset operation is in progress')
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+def test_home_feedback_verification_times_out_and_allows_retry(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    rclpy.init()
+    node = ArmTeleopNode(parameter_overrides=[
+        Parameter('home_feedback_timeout_sec', value=0.1),
+    ])
+    node._command_pub = MagicMock()
+
+    state = ArmState()
+    state.state = ArmState.STATE_IDLE
+    node._state_callback(state)
+    node._request_home()
+    opened = node._command_pub.publish.call_args.args[0]
+
+    state.state = ArmState.STATE_SUCCEEDED
+    state.sequence_id = opened.sequence_id
+    node._state_callback(state)
+    state.sequence_id = node._home_roll_pending_seq
+    node._state_callback(state)
+    home_seq = node._home_pending_seq
+    state.sequence_id = home_seq
+    state.position_valid = True
+    state.joint_position = [1.0] * 5
+    node._state_callback(state)
+    node._home_completion_time = time.monotonic() - 0.2
+    node._state_callback(state)
+
+    assert node._synced is False
+    assert node._home_pending_seq is None
+    assert node._enable_block_reason(time.monotonic()) == (
+        'last home pose verification failed; run home again')
+
+    published_before_retry = node._command_pub.publish.call_count
+    node._request_home()
+    assert node._command_pub.publish.call_count == published_before_retry + 1
+    assert node._command_pub.publish.call_args.args[0].mode == (
+        ArmCommand.MODE_GRIPPER)
+    assert node._home_failure_reason == ''
+    node.destroy_node()
+    rclpy.shutdown()
+
+
+def test_home_accepts_half_servo_tick_quantization_margin(
+        tmp_path, monkeypatch):
+    monkeypatch.setenv('ROS_LOG_DIR', str(tmp_path))
+    rclpy.init()
+    node = ArmTeleopNode()
+    node._command_pub = MagicMock()
+
+    state = ArmState()
+    state.state = ArmState.STATE_IDLE
+    node._state_callback(state)
+    node._request_home()
+    opened = node._command_pub.publish.call_args.args[0]
+
+    state.state = ArmState.STATE_SUCCEEDED
+    state.sequence_id = opened.sequence_id
+    node._state_callback(state)
+    state.sequence_id = node._home_roll_pending_seq
+    node._state_callback(state)
+    state.sequence_id = node._home_pending_seq
+    state.position_valid = True
+    state.joint_position = list(node._expected_home_joints)
+    state.joint_position[2] += math.radians(5.04)
+    for _ in range(3):
+        node._state_callback(state)
+
+    assert node._synced is True
     node.destroy_node()
     rclpy.shutdown()
 

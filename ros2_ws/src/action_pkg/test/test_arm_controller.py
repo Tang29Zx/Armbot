@@ -383,6 +383,48 @@ def test_stream_step_rejection_keeps_stream_open_for_end(node):
     assert node._active_mode == ArmCommand.MODE_CARTESIAN_SERVO_END
 
 
+def test_stream_step_rejection_is_published_before_queued_end(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+    node.state_pub = MagicMock()
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER_SERVO, seq=1,
+        gripper_position=0.1, duration_sec=0.3))
+    first_wire = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_EXECUTING, first_wire)
+    node.poll_status()
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER_SERVO, seq=2,
+        gripper_position=0.2, duration_sec=0.3))
+    rejected_wire = node._active_wire_id
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER_SERVO, seq=3,
+        gripper_position=0.3, duration_sec=0.3))
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER_SERVO_END, seq=4))
+    assert node._queued_stream_end.sequence_id == 4
+    node.state_pub.reset_mock()
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_FAILED, rejected_wire,
+        FW_ERROR_STREAM_STEP_TOO_LARGE)
+    node.poll_status()
+
+    assert node.state_pub.publish.call_count == 1
+    rejected = node.state_pub.publish.call_args.args[0]
+    assert rejected.state == ArmState.STATE_IDLE
+    assert rejected.command_phase == ArmState.PHASE_FAILED
+    assert rejected.sequence_id == 2
+    assert rejected.error_code == ERR_FW_STREAM_STEP_TOO_LARGE
+    assert node._active_mode == ArmCommand.MODE_GRIPPER_SERVO_END
+    assert node._active_seq == 4
+    assert [packet[0] for packet in writes] == [
+        ord('U'), ord('U'), ord('G')]
+
+
 @pytest.mark.parametrize('firmware_error, expected_error', [
     (FW_ERROR_STREAM_TIMEOUT, ERR_FW_STREAM_TIMEOUT),
     (FW_ERROR_SERVO_DEADLINE_MISSED, ERR_FW_SERVO_DEADLINE),
@@ -512,6 +554,50 @@ def test_gripper_stop_preempts_position_and_ignores_old_completion(node):
     node.poll_status()
     assert node._state == ArmState.STATE_SUCCEEDED
     assert node._last_sequence_id == 2
+
+
+def test_gripper_stop_closes_direct_stream_before_arm_motion(node):
+    writes = []
+    node._i2c_write = lambda data: writes.append(bytes(data)) or True
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER_SERVO,
+        seq=1,
+        gripper_position=0.8,
+        duration_sec=0.3,
+    ))
+    stream_wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_EXECUTING, stream_wire_id)
+    node.poll_status()
+    assert node._stream_open
+    assert node._stream_open_family == 'gripper'
+
+    node.handle_command(_cmd(ArmCommand.MODE_GRIPPER_STOP, seq=2))
+    stop_wire_id = node._active_wire_id
+    assert [packet[0] for packet in writes] == [ord('U'), ord('H')]
+    assert node._stream_open is False
+    assert node._stream_open_family is None
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_END_EFFECTOR,
+        seq=3,
+        x=15.0,
+        y=0.0,
+        z=2.0,
+        pitch=-54.48,
+        duration_sec=0.09,
+    ))
+    assert node._queued_command.sequence_id == 3
+    assert [packet[0] for packet in writes] == [ord('U'), ord('H')]
+
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_COMPLETED, stop_wire_id)
+    node.poll_status()
+
+    assert [packet[0] for packet in writes] == [
+        ord('U'), ord('H'), ord('A')]
+    assert node._active_seq == 3
 
 
 def test_gripper_stop_waits_for_active_arm_completion(node):
@@ -889,6 +975,41 @@ def test_different_motion_modes_wait_for_completion(node):
     assert node._active_seq == 2
 
 
+def test_queued_command_preserves_active_public_lifecycle(node):
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER, seq=1,
+        gripper_position=1.0, duration_sec=0.09))
+    active_wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_ACCEPTED, active_wire_id)
+    node.poll_status()
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_END_EFFECTOR, seq=2,
+        x=15.0, y=0.0, z=2.0, pitch=-54.48,
+        duration_sec=0.09))
+
+    assert node._queued_command.sequence_id == 2
+    assert node._state == ArmState.STATE_MOVING
+    assert node._command_phase == ArmState.PHASE_ACCEPTED
+    assert node._last_sequence_id == 1
+
+
+def test_queued_stream_end_preserves_active_public_lifecycle(node):
+    node.handle_command(_cmd(
+        ArmCommand.MODE_CARTESIAN_SERVO, seq=1,
+        x=15.0, y=0.0, z=2.0, pitch=-54.48,
+        duration_sec=0.3))
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_CARTESIAN_SERVO_END, seq=2))
+
+    assert node._queued_stream_end.sequence_id == 2
+    assert node._state == ArmState.STATE_MOVING
+    assert node._command_phase == ArmState.PHASE_NONE
+    assert node._last_sequence_id == 1
+
+
 def test_completed_state_is_published_before_queued_motion(node):
     writes = []
     node._i2c_write = lambda data: writes.append(bytes(data)) or True
@@ -1102,6 +1223,103 @@ def test_command_timeout_reports_error(node):
     assert node._error_code == ERR_CMD_TIMEOUT
     assert node._state == ArmState.STATE_ERROR
     assert node._queued_command is None
+
+
+def test_missing_terminal_lifecycle_times_out_and_clears_queue(node):
+    import time
+    node.set_parameters(
+        [Parameter('command_timeout_sec', Parameter.Type.DOUBLE, 0.05)])
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER, seq=1,
+        gripper_position=1.0, duration_sec=0.05))
+    active_wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_ACCEPTED, active_wire_id)
+    node.poll_status()
+    node.handle_command(_cmd(
+        ArmCommand.MODE_END_EFFECTOR, seq=2,
+        x=15.0, y=0.0, z=2.0, pitch=-54.48,
+        duration_sec=0.05))
+
+    time.sleep(0.15)
+    node._i2c_read_status = lambda: None
+    node.poll_status()
+
+    assert node._state == ArmState.STATE_ERROR
+    assert node._error_code == ERR_CMD_TIMEOUT
+    assert 'terminal firmware lifecycle' in node._error_message
+    assert node._queued_command is None
+    assert node._active_wire_id == 0
+
+
+def test_stream_end_uses_full_motion_window_before_terminal_timeout(node):
+    import time
+    node.set_parameters([
+        Parameter('command_timeout_sec', Parameter.Type.DOUBLE, 0.05),
+        Parameter('max_duration_sec', Parameter.Type.DOUBLE, 0.20),
+    ])
+    node.handle_command(_cmd(
+        ArmCommand.MODE_CARTESIAN_SERVO, seq=1,
+        x=15.0, y=0.0, z=2.0, pitch=-54.48,
+        duration_sec=0.10))
+    stream_wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_EXECUTING, stream_wire_id)
+    node.poll_status()
+
+    node.handle_command(_cmd(
+        ArmCommand.MODE_CARTESIAN_SERVO_END, seq=2))
+    end_wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_EXECUTING, end_wire_id)
+    node.poll_status()
+
+    time.sleep(0.10)
+    node._i2c_read_status = lambda: None
+    node.poll_status()
+    assert node._state == ArmState.STATE_MOVING
+    assert node._active_wire_id == end_wire_id
+
+    time.sleep(0.20)
+    node.poll_status()
+    assert node._state == ArmState.STATE_ERROR
+    assert node._error_code == ERR_CMD_TIMEOUT
+    assert node._active_wire_id == 0
+
+
+def test_reset_recovers_orphan_moving_without_active_command(node):
+    node._set_state(
+        ArmState.STATE_MOVING, seq=9, phase=ArmState.PHASE_NONE)
+
+    response = node.reset_error_callback(
+        Trigger.Request(), Trigger.Response())
+
+    assert response.success is True
+    assert node._state == ArmState.STATE_IDLE
+    assert node._command_phase == ArmState.PHASE_NONE
+
+
+def test_poll_reconciles_orphan_moving_without_active_command(node):
+    node._set_state(
+        ArmState.STATE_MOVING, seq=9, phase=ArmState.PHASE_NONE)
+
+    node.poll_status()
+
+    assert node._state == ArmState.STATE_IDLE
+    assert node._command_phase == ArmState.PHASE_NONE
+
+
+def test_reset_remains_blocked_while_command_is_active(node):
+    node.handle_command(_cmd(
+        ArmCommand.MODE_END_EFFECTOR, seq=1,
+        x=15.0, y=0.0, z=2.0, pitch=-54.48,
+        duration_sec=0.05))
+
+    response = node.reset_error_callback(
+        Trigger.Request(), Trigger.Response())
+
+    assert response.success is False
+    assert 'command active' in response.message
 
 
 # ===================== legacy compatibility layer =====================

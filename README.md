@@ -9,7 +9,25 @@ bash scripts/build-rdk-ros2.sh
 ```
 
 脚本会加载 ROS 2 Humble，优先使用兼容的 Ubuntu 系统 Python 包，并以
-symlink 模式构建 `action_interfaces` 和 `action_pkg`。
+symlink 模式构建 `action_interfaces`、`action_pkg` 和 `vla_dataset`。
+
+## VLA episode 试采
+
+先启动现有机械臂控制栈和带时间戳的 `/image` 相机 topic，再运行：
+
+```bash
+source ros2_ws/install/setup.bash
+ros2 run vla_dataset record_episode \
+  --task "抓取红色方块"
+```
+
+按 `Ctrl+C` 结束。数据默认写入 `~/vla_episodes`，新 episode 固定标记为
+`unreviewed`，不能直接进入训练集。字段、风险和验收标准见
+[`docs/vla-data-collection.md`](docs/vla-data-collection.md)。
+
+需要严格追溯固件版本时，可额外传入可选参数
+`--firmware-sha256 <实际烧录固件的64位SHA-256>`；省略时 manifest 记录为
+`unknown`。
 
 ## Git Hooks
 

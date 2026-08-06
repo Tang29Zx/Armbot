@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<dds>
+  <profiles xmlns="http://www.eprosima.com/XMLSchemas/fastRTPS_Profiles">
+    <!-- Variable-sized images and strings must be able to grow past the
+         initial Fast DDS history payload allocation. -->
+    <data_writer profile_name="ArmbotDefaultWriter" is_default_profile="true">
+      <historyMemoryPolicy>PREALLOCATED_WITH_REALLOC</historyMemoryPolicy>
+    </data_writer>
+    <data_reader profile_name="ArmbotDefaultReader" is_default_profile="true">
+      <historyMemoryPolicy>PREALLOCATED_WITH_REALLOC</historyMemoryPolicy>
+    </data_reader>
+
+    <transport_descriptors>
+      <transport_descriptor>
+        <transport_id>ArmbotUdp</transport_id>
+        <type>UDPv4</type>
+        <interfaceWhiteList>
+          <address>127.0.0.1</address>
+          <address>192.168.3.147</address>
+        </interfaceWhiteList>
+      </transport_descriptor>
+      <transport_descriptor>
+        <transport_id>ArmbotShm</transport_id>
+        <type>SHM</type>
+      </transport_descriptor>
+    </transport_descriptors>
+
+    <participant profile_name="ArmbotParticipant" is_default_profile="true">
+      <rtps>
+        <userTransports>
+          <transport_id>ArmbotUdp</transport_id>
+          <transport_id>ArmbotShm</transport_id>
+        </userTransports>
+        <useBuiltinTransports>false</useBuiltinTransports>
+      </rtps>
+    </participant>
+  </profiles>
+</dds>

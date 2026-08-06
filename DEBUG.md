@@ -1,6 +1,6 @@
 # 当前调试问题
 
-最近更新：2026-07-31
+最近更新：2026-08-05
 
 本文只记录当前仍未关闭的问题；已关闭问题完整归档到 `DEBUG_CLOSED.md`。
 状态含义：
@@ -11,6 +11,149 @@
 - **已验证，待用户验收**：agent 验证已通过，等待用户确认真实使用结果。
 - **用户已验收，已关闭**：用户确认后立即移入 `DEBUG_CLOSED.md`，不得留在本文。
 - **阻塞验收**：修复前不得把真实机械臂控制描述为完成。
+
+## P1：控制器长期停在假 `MOVING` 状态
+
+状态：**已验证，待用户验收**
+
+### 现象与根因
+
+- 2026-08-05 单栈只读检查确认：Xbox 全部摇杆和扳机均为中立，4 秒内没有新的
+  `/arm/command`，但 `/arm/state` 仍保持
+  `MOVING/PHASE_NONE/sequence_id=1113/error_code=0`。此前日志出现多次
+  `STREAM_STEP_TOO_LARGE`、流 END 拒绝和 ACK 超时，说明这不是手柄噪声导致的
+  持续运动命令。
+- controller 在活动命令等待 ACK/终态时收到跨模式命令或流 END，会把新命令存入
+  队列，却提前把公开状态改成该未下发命令的 `MOVING/PHASE_NONE`。该命令没有
+  `wire_command_id`，因此固件不可能返回与它匹配的终态。
+- 原 ACK watchdog 在收到 `ACCEPTED/EXECUTING` 后立即解除，但没有第二个终态
+  deadline；如果 `COMPLETED/FAILED` 被错过或 END 失败，活动命令和跨模式队列可
+  永久保留。Reset 又只检查公开 `STATE_MOVING`，导致假状态无法恢复。
+
+### 已修改与验证
+
+- 未下发的排队命令不再改写公开 `state/phase/sequence_id`，公开生命周期始终对应
+  当前真实 `wire_command_id`。
+- 新增 `duration_sec + command_timeout_sec` 终态 watchdog；超时会清除活动命令、
+  流状态和队列，并报告 `ERR_CMD_TIMEOUT`。轮询会把无 pending、无活动 wire ID 的
+  孤立 `MOVING` 自动协调回 `IDLE`。
+- Reset 改为检查 pending/活动 wire ID；假 `MOVING` 可以清错，真实活动命令仍阻止
+  Reset。
+- 6 个针对性回归先在旧实现全部失败，修复后全部通过；RDK 隔离 ROS Domain 230 的
+  完整 `action_pkg` 回归为 `120 passed、1 skipped`。controller、测试与接口契约已
+  同步到 RDK，哈希与本地一致；覆盖前备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-fake-moving-lifecycle`。
+  生产控制栈尚未重启，当前 PID 5713 仍运行旧进程内存中的代码，不能把实机问题
+  标记为已验收。
+- 部署后只读快照显示旧进程已从假 `MOVING` 转为
+  `STATE_ERROR/PHASE_FAILED/error_code=0x0001`，I2C 连续失败 5924 次，最新错误为
+  `[Errno 121] Remote I/O error`；`position_valid=false`、teleop disabled。该 I2C
+  故障与本次生命周期修复是两个问题，恢复总线前不得重启后直接使能运动。
+- 2026-08-05 16:54 新栈启动后，I2C 已恢复且反馈有效；此时再次出现的 `MOVING`
+  不是 controller 孤立状态。只读采样发现 `joy_linux` 持续上报
+  `axes[4]=+1.0、axes[5]=0.0`，teleop 因而以约 10 Hz 发布
+  `MODE_GRIPPER_SERVO`，固件对每个新 wire ID 正常返回 `EXECUTING/error=0`。
+  根因是未触碰的绝对扳机轴启动值为 `0.0`，而映射把 `+1.0` 作为释放、`0.0`
+  作为半按。
+- teleop 现对两个扳机分别设置初始化门：首次真实观察到释放端点前，将该轴按
+  `+1.0` 中立处理；Joy 超时或无效输入后重新初始化。新增用例先复现旧实现的假
+  夹爪流，修复后定向用例通过，RDK 隔离完整回归为 `122 passed、1 skipped`。
+  teleop、测试和文档已同步到 RDK，覆盖前备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-trigger-init`；当前 PID
+  13860 仍是同步前启动的旧进程，需安全重启后才会加载修复。
+- 2026-08-05 17:05 新栈加载扳机修复后，启动假夹爪流已消失，但暴露出主机终态
+  watchdog 对流 END 的时长建模错误：`F/wire_id=185` 执行 3 秒时被主机提前报
+  `0x0016`，固件约 4.8 秒后才正常返回 `COMPLETED`，总收敛时间约 7.8 秒。主机
+  提前清除活动 wire ID 后发送 `wire_id=186`，固件仍在完成 F，因而正确拒绝为
+  `ARM_NOT_READY`；当前 `wire_id=367` 是同一签名的再次复现。
+- 根因是 `F/G` 帧没有 duration 字段，旧实现把它们的期望时长当成 0，只留下 3 秒
+  ACK 余量；但固件运动完成上限为 30 秒。controller 已改为 `F/G` 使用
+  `max_duration_sec + command_timeout_sec`，普通命令仍使用自身 duration 加 ACK
+  余量。失败回归先复现 3 秒误杀，修复后通过；RDK 隔离完整回归为
+  `123 passed、1 skipped`。controller、测试和契约已同步到 RDK，覆盖前备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-stream-end-terminal-window`；
+  当前 PID 19838 仍为同步前旧进程，待安全重启和实机 END 验收。
+- 2026-08-05 17:19 agent 完成受控实机验收：只启动一套新栈（controller PID
+  26279），`joy_linux` 启动时两个未触碰扳机均为 `0.0`，静置 3 秒没有任何
+  `/arm/command`，controller 保持 `IDLE/error=0`，证明扳机初始化门已实际生效。
+- 当前位置附近 Home `seq=2` 正常 `SUCCEEDED`；随后发送 5 个总位移仅 `0.05 cm`
+  的 T（`seq=3～7`），全部进入匹配 `EXECUTING`，F `seq=8` 在 0.387 秒后
+  `COMPLETED/error=0`。再验证快速重新推杆边界 `T9 → F10 → T11 → F12`，所有
+  wire 生命周期按序执行，最终 F 在约 0.405 秒完成，无 `ARM_NOT_READY`、终态超时
+  或状态错配。
+- 测试脚本第一次误用 `mode=2`，被 controller 按契约拒绝为 `MODE_JOINT disabled`，
+  未产生硬件运动；随后显式 Reset 并使用接口定义的正确枚举继续。最终静置 5 秒无
+  意外命令，状态为 `SUCCEEDED/COMPLETED/seq=12/position_valid=true/error=0`，
+  teleop disabled，单栈 5 个预期进程均存活。当前日志中除此人为拒绝外仅有手柄
+  force-feedback 不可用警告，不影响控制输入。
+- 2026-08-05 17:27 用户重新启动单栈后，第一条命令 `seq=1/wire_id=1` 立即被固件
+  拒绝为 `ARM_NOT_READY`；此时 I2C 正常、`position_valid=true`、Joy 无命令且
+  teleop disabled。根因是 real teleop 启动时只凭连续三帧关节接近 Home 就自动
+  `_synced=True`，但 ROS 进程重启后该物理姿态不能证明 STM32 内部滚动规划器仍
+  ready，导致 A 后第一条 T 才暴露错误。
+- 已移除实机启动自动同步路径。现在只有显式 Home 的匹配 `COMPLETED`、有效反馈、
+  Home 容差内连续三帧三项同时满足时才设置 synced；启动时 A 明确提示
+  `target is not synchronized; run home first`。扳机/摇杆不必回中的既有行为不变。
+  失败回归先复现旧自动同步，修复后定向用例与 RDK 隔离完整回归
+  `123 passed、1 skipped` 均通过。源码、测试和文档已部署到 RDK，覆盖前备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-explicit-home-on-start`；
+  部署时控制栈为空，并已重建 `action_pkg`；安装层实际加载文件与源码 SHA-256 一致。
+  本轮未自动启动或产生机械臂命令，待用户按显式 Home 流程实机验证。
+- 2026-08-05 17:45 现场确认 Home 手势并非未响应：夹爪、腕转和笛卡尔命令均已
+  下发，`seq=602` 也已为 `SUCCEEDED/COMPLETED`，但关节反馈长时间未稳定进入 Home
+  容差，直到约 4 分钟后才出现 `home feedback verified`。期间 A 因检查顺序错误一直
+  误报 `run home first`，使正在执行的 Home 看起来像没有响应。修复为 Home/reset
+  pending 优先提示 `home/reset operation is in progress`；固件完成后增加 `3 s`
+  反馈验证期限，超时会打印 position validity、实际/期望关节角，清除 pending 并允许
+  显式重试，仍保持 unsynced，绝不绕过反馈使能。修复、配置、测试和文档已部署，
+  RDK 完整隔离回归为 `125 passed、1 skipped`，源码/build/install 三层哈希一致；备份
+  位于 `/home/sunrise/.local/state/armbot/deploy-backups/20260805-home-feedback-verification`。
+  部署前启动的 PID 29741 仍为旧内存代码且没有新参数，需安全重启控制栈后生效。
+- 2026-08-05 18:00 新栈首次两次 Home 失败的唯一越界关节为 elbow：实际
+  `-84.00 deg`、预期 `-89.04 deg`，误差 `5.04 deg`，仅比原 `5.00 deg` 容差多
+  `0.04 deg`，且小于 Lobot 反馈约 `0.24 deg/raw tick` 的一个量化刻度。随后
+  `18:00:40` 固件状态独立出现无效 v3 包，再回到 `READY/wire_id=0`，controller 正确
+  锁存 `firmware restarted`；这才是该次必须 Reset 的原因，不能自动清除。Home 预置
+  容差已收敛地放大到 `5.25 deg`，新增 `5.04 deg` 边界回归；RDK 完整隔离测试
+  `126 passed、1 skipped`，源码/build/install 哈希一致。备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-home-tolerance-5p25`；当前 PID
+  33642 仍持有旧 `5.00 deg` 参数，重启后才加载新预置。
+- 2026-08-05 18:10 后续夹爪操作首先出现 26 次连续
+  `FAILED/STREAM_STEP_TOO_LARGE (0x0026)`，随后固件流进入
+  `STOPPING/STREAM_TIMEOUT`，最后 `G(gripper)` 等待 33 秒仍无终态。首个拒绝发生
+  后，controller 在同一次轮询中立即下发排队 END，公开拒绝沿被新的 `MOVING`
+  覆盖，teleop 因而没有暂停并继续累计夹爪目标，形成错误风暴。
+- 主机侧已改为以最后匹配 `PHASE_EXECUTING` 的直接舵机目标为基线，夹爪/腕转每次
+  最多前进 `9 deg`；未确认期间只刷新相同边界。controller 会在排队 END 前立即
+  发布拒绝快照，teleop 收到后回滚、只结束一次流并暂停等待输入回中。4 个新增
+  定向回归和 RDK 正式源码完整回归均已通过，最终结果为
+  `130 passed、1 skipped、3 warnings`。源码、build 软链接和 install 运行时解析到的
+  controller/teleop 哈希一致；部署前备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-direct-stream-confirmed-step`。
+  构建前后的生产进程仍为 PID 35877/35889/35891，没有 pkill、重启或运动命令；它们
+  仍运行旧内存代码，需用户重启后再做 60 秒实机验收。
+- 2026-08-05 18:41 用户重启新栈后复测，`gripper_stream_max_target_step=0.075` 与
+  `wrist_stream_max_target_step_deg=9.0` 已由运行节点加载；夹爪 `U` 从 wire 60 起均为
+  `EXECUTING/error=0`，不再出现跨度拒绝。新的唯一失败为
+  `G(gripper) seq=277/wire_id=161` 在 33 秒内没有任何终态，controller 报
+  `0x0016 no terminal firmware lifecycle`；期间机械臂命令因跨模式互斥只能排队，
+  因而表现为夹爪动过后机械臂失控。同期 Joy 已中立，内核没有 I2C timeout、仲裁
+  丢失或文件系统错误，排除上轮步长和本轮总线故障。
+- Xbox 夹爪结束路径已改为 `MODE_GRIPPER_STOP/H`，仅腕转继续使用 `G`。controller
+  在 H 抢占 U/G 时立即清除 gripper stream，并在 H 匹配完成后放行机械臂命令。
+  3 个定向回归与 RDK 正式源码完整回归通过，结果为
+  `131 passed、1 skipped、3 warnings`；源码、build 软链接和 install 运行时哈希
+  一致，部署前备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-gripper-halt-end`。生产栈
+  PID 47737/47749/47751 未被停止或重启，仍需用户重启后的实机验收。
+
+### 关闭标准
+
+- 在机械臂周围清空并重新启动单套控制栈后，静止时不再长期出现
+  `MOVING/PHASE_NONE`。
+- 分别验证夹爪→笛卡尔、笛卡尔→夹爪及流 END；每条活动命令最终到达终态，或在
+  deadline 后进入带明确错误信息的超时状态。
+- 连续实机操作至少 60 秒无假 `MOVING`，用户确认后归档。
 
 ## 当前实机快照
 
@@ -77,6 +220,114 @@
   坐标生成。
 - 当前节点维护的是“最后一次命令目标”，不是实测末端坐标。由于完成状态不可靠，
   维护目标已经可能与真实机械臂姿态脱节。
+
+## P2：RDK 离线修复后缺少 colcon 构建工具
+
+状态：**已确认**
+
+### 现象与证据
+
+- 2026-08-04：同步 Xbox `joy_linux` launch 修改后执行
+  `bash scripts/build-rdk-ros2.sh`，脚本在调用 `colcon` 时返回
+  `command not found`；`python3-colcon-common-extensions` 当前未安装。
+- 现有 workspace 是 `--symlink-install`，安装态 launch 和 `package.xml` 最终解析到
+  source 目录，因此本轮两个文件的修改已经生效；`ros2 launch ... --show-args` 可正常
+  解析，但这不能替代一次干净构建。
+- `apt-get --simulate` 显示恢复 `python3-colcon-common-extensions` 会新增 36 个构建和
+  测试相关包、不会升级或删除现有包。本轮 Xbox 连接不依赖这些包，尚未扩大安装范围。
+
+### 影响
+
+- 当前运行态不受影响，但后续清空 build/install 或修改非软链接产物时无法重建项目。
+
+### 关闭标准
+
+- 恢复 `colcon` 后运行 `bash scripts/build-rdk-ros2.sh` 成功，并完成相关测试；
+  `dpkg --audit` 无输出。
+
+## P1：RDK USB 相机在 1280×720 启动时发生 Fast CDR buffer 崩溃
+
+状态：**已验证，待用户验收**
+
+### 现象与证据
+
+- 2026-08-03：用户在 RDK 使用 `hobot_usb_cam`、`/dev/video0`、MJPEG、
+  `1280×720@30 fps`、`usb_zero_copy=False` 启动相机；进程创建成功后立即以
+  `exit code -6` 退出。
+- 崩溃异常为
+  `eprosima::fastcdr::exception::NotEnoughMemoryException: Not enough memory in the buffer stream`。
+- 启动日志确认 `hobot_shm` 加载的是
+  `/home/sunrise/.config/armbot/fastdds.xml`，并设置
+  `RMW_FASTRTPS_USE_QOS_FROM_XML=1`。该自定义 profile 没有 DataWriter/DataReader 的
+  `historyMemoryPolicy`，因此 Fast DDS 回退到固定大小的 `PREALLOCATED`；640×480 和
+  1280×720 均可复现，RTPS 还明确报告 payload 大于 history payload 且不可扩容。
+- 增加默认 `PREALLOCATED_WITH_REALLOC` 后暴露出第二个独立故障：
+  `CompressedImage` 和 `SetBool` 的 introspection type-support 导出符号已发生位级
+  损坏。`dpkg -V` 确认
+  `libsensor_msgs__rosidl_typesupport_introspection_cpp.so`、
+  `libstd_srvs__rosidl_typesupport_introspection_cpp.so` 和
+  `sensor_msgs/msg/_imu_s.c` 校验失败；`ros-humble-std-msgs` 原本已处于
+  `purge ok half-installed`。
+- 使用官方 4.9.1 deb 解包出的只读临时 overlay，加上
+  `PREALLOCATED_WITH_REALLOC` profile 后，1280×720 MJPEG 相机成功持续发布
+  `sensor_msgs/msg/CompressedImage`，实测约 29.9 Hz，消息格式为 `jpeg`。
+- 2026-08-03 正式重装时，ext4 对 `std_msgs` 的多个 `int64` 头文件返回
+  `EUCLEAN/Bad message`。内核日志确认 `/dev/mmcblk1p2` 已累计 56 次 ext4 错误，
+  多个 inode checksum invalid；`tune2fs` 显示 `clean with errors`。因此根因已从
+  ROS 配置追到根文件系统损坏，挂载状态下不得继续强行修包或采集训练数据。
+- 本轮已将原损坏的三个文件备份到
+  `/home/sunrise/.local/state/armbot/package-backups/20260803-ros-msg-corruption`。
+  重装被文件系统错误中断后，`sensor_msgs 4.9.1` 为 unpacked、
+  `std_srvs 4.9.1` 已配置、`std_msgs 4.9.0` 仍为 half-installed；必须先离线 fsck，
+  再恢复包管理状态。
+- `/sys/block/mmcblk1/device/type` 已确认启动盘为可拔出的 SD/TF 卡；根分区固定为
+  `/dev/mmcblk1p2`。断电取卡前，RDK 项目源码（排除 build/install/log 和 `.git`）及
+  当前 DDS 配置已只读备份到本机
+  `/home/tang/projects/rdk-recovery-20260803-1808`，共 268 个源码/配置文件、约 7.6 MB。
+- 当前镜像没有可用的“下次启动自动修根分区”路径：`/etc/fstab` 未配置根分区，
+  `systemd-fsck-root.service` 因 `/` 已经以读写方式挂载而保持 inactive，且没有
+  `/run/initramfs/fsck-root` 记录。不得在当前挂载根分区上运行 `e2fsck`；最小安全
+  修复路径是关机取出 TF 卡，在 Ubuntu Live/另一套 Linux 中离线执行 fsck。
+- 2026-08-03 修复后验收尝试：旧地址 `192.168.127.10:22` 返回 `No route to host`，
+  WSL 在 `192.168.127.0/24` 的邻居探测没有发现任何可达主机，连
+  `192.168.127.1` 也没有 ARP 响应。当前无法读取板端 fsck、内核或 dpkg 结果，
+  因而不能标记为已修复；需先恢复 RDK 启动和有线连接，或从板端提供新 IP。
+- 2026-08-04 修复后验收续测：新地址 `192.168.3.147:22` 已可达，在线主机指纹与旧
+  RDK 的三类已保存指纹完全一致，确认设备身份。当前 SSH 返回
+  `Permission denied (publickey,password)`，说明客户端公钥尚未被板端账户授权；需先
+  用 `ssh-copy-id` 恢复授权，之后才能读取离线 fsck、内核、dpkg 和相机启动结果。
+- 2026-08-04 用户恢复 SSH 公钥授权后完成 agent 验证：`tune2fs` 显示根分区状态为
+  `clean`，本次和上次启动的内核日志均无 ext4、checksum、I/O 或 `EUCLEAN` 错误；
+  `ros-humble-std-msgs`、`ros-humble-sensor-msgs`、`ros-humble-std-srvs` 均为 `ii`，
+  `dpkg --audit` 与三包 `dpkg -V` 均无输出，两个曾损坏的 ROS interface 可正常加载。
+- 仓库和 RDK 的 `fastdds.xml` 已同时加入 DataWriter/DataReader
+  `PREALLOCATED_WITH_REALLOC`，UDP allowlist 更新为 `192.168.3.147`，两端 SHA-256
+  均为 `f34b95353d2c5be5d1bc8f89cbb866972a696a86e9efbfa98c0ea96463303707`；旧配置保存在
+  `/home/sunrise/.local/state/armbot/config-backups/fastdds-20260804-before-wifi-fix.xml`。
+- 使用正式配置启动 1280×720、MJPEG、30 fps 相机，`/image` 类型为
+  `sensor_msgs/msg/CompressedImage`，连续约 35 秒稳定在约 29.88 Hz；日志中没有
+  `NotEnoughMemory`、进程崩溃或 `exit code -6`，停止后无相机进程残留，内核也没有
+  新增文件系统错误。厂商默认 calibration 文件缺失的警告仍存在，但不阻塞当前
+  `/image` 采集；需要几何标定结果时另行补齐。
+
+### 影响
+
+- 修复前 `/image` 没有可靠发布者，`vla_dataset` 会得到缺少视觉观测的无效 episode；
+  本轮相机发布链已恢复。
+- 修复前根文件系统元数据和 ROS 系统包均不完整，存在生成损坏 rosbag 的风险；本轮
+  可观测的文件系统与包完整性检查已恢复正常。
+- 本问题的验证不代表机械臂、I2C 或 STM32 控制链已完成最终验收。
+
+### 关闭标准
+
+- 在根分区未挂载时对 `/dev/mmcblk1p2` 完成 `fsck.ext4 -f`，重启后确认内核没有新增
+  ext4/inode checksum 错误。
+- 重新安装并配置 `std_msgs`、`sensor_msgs`、`std_srvs`，要求三包均为 `ii`、
+  `dpkg --audit` 和对应 `dpkg -V` 无输出。
+- 部署仓库中的 `config/fastdds.xml`，保留现有 UDP allowlist 和 SHM，同时让可变长度
+  payload 使用 `PREALLOCATED_WITH_REALLOC`。
+- 最终命令持续运行至少 30 秒，`/image` 类型正确、频率稳定且进程无异常退出。
+- 修复不得破坏 RDK 本机与 WSL 的 Domain 29 ROS 发现，也不得要求启动第二套控制栈。
 
 ## P1：右摇杆左右无法控制腕部旋转
 

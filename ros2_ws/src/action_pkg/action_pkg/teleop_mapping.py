@@ -85,6 +85,17 @@ def integrate_target(target, axes, dt, *, deadzone, translation_speed,
     right_x_axis = apply_deadzone(float(axes[2]), deadzone)
     pitch_axis = right_x_axis if pitch_modifier else 0.0
 
+    close_amount = trigger_pressed(float(axes[4]))
+    open_amount = trigger_pressed(float(axes[5]))
+    gripper_axis = close_amount - open_amount
+    if abs(gripper_axis) > trigger_deadzone:
+        updated = replace(
+            target,
+            gripper=clamp(target.gripper + gripper_axis * gripper_speed * dt,
+                          0.0, 1.0),
+        )
+        return updated, MODE_GRIPPER
+
     if any(value != 0.0 for value in (x_axis, y_axis, z_axis)) or (
             pitch_modifier and pitch_axis != 0.0):
         updated = replace(
@@ -106,17 +117,7 @@ def integrate_target(target, axes, dt, *, deadzone, translation_speed,
         )
         return updated, MODE_WRIST_ROLL
 
-    close_amount = trigger_pressed(float(axes[4]))
-    open_amount = trigger_pressed(float(axes[5]))
-    gripper_axis = close_amount - open_amount
-    if abs(gripper_axis) <= trigger_deadzone:
-        return target, None
-    updated = replace(
-        target,
-        gripper=clamp(target.gripper + gripper_axis * gripper_speed * dt,
-                      0.0, 1.0),
-    )
-    return updated, MODE_GRIPPER
+    return target, None
 
 
 def joints_near_home(actual, expected, tolerance_rad):

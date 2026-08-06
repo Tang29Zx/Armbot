@@ -223,6 +223,8 @@ class ArmControllerNode(Node):
         self._active_wire_id = 0
         self._active_seq = 0
         self._active_mode = None
+        self._active_sent_ns = 0
+        self._active_expected_duration_sec = 0.0
         self._wire_id_counter = 0
         self._queued_command = None
         self._queued_stream_end = None
@@ -554,8 +556,6 @@ class ArmControllerNode(Node):
                         and self._stream_family(
                             self._queued_command.mode) == family)):
                 self._queued_stream_end = copy.deepcopy(cmd)
-                self._set_state(
-                    ArmState.STATE_MOVING, seq, ArmState.PHASE_NONE)
                 return
         blocked_by_ack = self._pending_motion
         blocked_by_mode = (
@@ -576,8 +576,6 @@ class ArmControllerNode(Node):
                     % (_motion_mode_tag(previous.mode),
                        int(previous.sequence_id),
                        _motion_mode_tag(cmd.mode), seq, reason))
-            self._set_state(
-                ArmState.STATE_MOVING, seq, ArmState.PHASE_NONE)
             return
 
         # A command that can run now is the newest operator intent. Do not let
@@ -610,6 +608,12 @@ class ArmControllerNode(Node):
             self._last_applied_seq = seq
         self._queued_command = None
         self._queued_stream_end = None
+        if (self._stream_open_family == 'gripper'
+                or self._stream_family(self._active_mode) == 'gripper'):
+            # H invalidates an active U/G stream immediately.  Do not leave a
+            # stale gripper family that can make a later END look valid.
+            self._stream_open = False
+            self._stream_open_family = None
         if self._dispatch_motion(cmd):
             return
 
@@ -650,6 +654,16 @@ class ArmControllerNode(Node):
         self._active_wire_id = wire_id
         self._active_seq = seq
         self._active_mode = cmd.mode
+        self._active_sent_ns = self.get_clock().now().nanoseconds
+        duration_sec = float(cmd.duration_sec)
+        if cmd.mode == ArmCommand.MODE_GRIPPER and (
+                not math.isfinite(duration_sec) or duration_sec <= 0.0):
+            # _send_gripper uses the same one-second fallback on the wire.
+            duration_sec = 1.0
+        self._active_expected_duration_sec = (
+            duration_sec
+            if math.isfinite(duration_sec) and duration_sec > 0.0
+            else 0.0)
         self._set_state(
             ArmState.STATE_MOVING, seq, ArmState.PHASE_NONE)
         self._arm_pending_motion(seq, wire_id)
@@ -690,8 +704,14 @@ class ArmControllerNode(Node):
 
     def _clear_active_motion(self, clear_queue=True):
         self._pending_motion = False
+        self._pending_seq = 0
+        self._pending_wire_id = 0
+        self._pending_sent_ns = 0
         self._active_wire_id = 0
+        self._active_seq = 0
         self._active_mode = None
+        self._active_sent_ns = 0
+        self._active_expected_duration_sec = 0.0
         if clear_queue:
             self._queued_command = None
             self._queued_stream_end = None
@@ -1078,6 +1098,8 @@ class ArmControllerNode(Node):
         now_ns = self.get_clock().now().nanoseconds
         timeout_ns = int(self._cfg('command_timeout_sec') * 1e9)
         if now_ns - self._pending_sent_ns > timeout_ns:
+            seq = self._pending_seq
+            wire_id = self._pending_wire_id
             self._clear_active_motion()
             self._stream_open = False
             self._stream_open_family = None
@@ -1085,8 +1107,60 @@ class ArmControllerNode(Node):
                 ERR_CMD_TIMEOUT,
                 'no matching firmware ack within %.2fs '
                 '(seq=%d, wire_id=%d)'
-                % (self._cfg('command_timeout_sec'), self._pending_seq,
-                   self._pending_wire_id))
+                % (self._cfg('command_timeout_sec'), seq, wire_id))
+
+    def _check_terminal_timeout(self):
+        """
+        Require every acknowledged command to reach a terminal state.
+
+        The ACK watchdog ends after ACCEPTED/EXECUTING.  Keep a second,
+        duration-aware deadline so a lost COMPLETED/FAILED packet cannot leave
+        an active command and cross-mode queue stuck forever.
+        """
+        if (self._pending_motion or self._estop_latched
+                or self._active_wire_id == 0
+                or self._active_sent_ns == 0):
+            return
+        expected_duration_sec = max(
+            0.0, self._active_expected_duration_sec)
+        if self._is_stream_end(self._active_mode):
+            # F/G have no duration field on the wire.  They decelerate from
+            # the current planned velocity and may legitimately need the
+            # firmware's full 30-second motion window before reaching their
+            # stable completion criteria.  Do not treat zero wire duration as
+            # an immediate command and release the cross-mode queue early.
+            expected_duration_sec = max(
+                expected_duration_sec,
+                max(0.0, float(self._cfg('max_duration_sec'))))
+        timeout_sec = expected_duration_sec + max(
+            0.0, float(self._cfg('command_timeout_sec')))
+        now_ns = self.get_clock().now().nanoseconds
+        if now_ns - self._active_sent_ns <= int(timeout_sec * 1e9):
+            return
+        seq = self._active_seq
+        wire_id = self._active_wire_id
+        mode = self._active_mode
+        self._clear_active_motion()
+        self._stream_open = False
+        self._stream_open_family = None
+        self._set_error(
+            ERR_CMD_TIMEOUT,
+            'no terminal firmware lifecycle within %.2fs '
+            '(seq=%d, wire_id=%d, mode=%s)'
+            % (timeout_sec, seq, wire_id, _motion_mode_tag(mode)))
+
+    def _reconcile_motion_state(self):
+        """Repair a public MOVING state that has no hardware lifecycle."""
+        if self._pending_motion or self._active_wire_id != 0:
+            return
+        if (self._queued_command is not None
+                or self._queued_stream_end is not None):
+            self._flush_queued_command()
+            if self._pending_motion or self._active_wire_id != 0:
+                return
+        if self._state == ArmState.STATE_MOVING:
+            self._set_state(
+                ArmState.STATE_IDLE, phase=ArmState.PHASE_NONE)
 
     # ===================== publishers =====================
     def publish_state(self):
@@ -1184,6 +1258,8 @@ class ArmControllerNode(Node):
 
     def poll_status(self):
         self._check_command_timeout()
+        self._check_terminal_timeout()
+        self._reconcile_motion_state()
 
         data = self._i2c_read_status()
         if data is None:
@@ -1334,6 +1410,9 @@ class ArmControllerNode(Node):
                     and self._is_stream_target(failed_mode)))
             if recoverable_rejection:
                 self._set_recoverable_rejection(code, message)
+                # Preserve the rejected target edge before a queued END
+                # dispatch replaces the public lifecycle in this callback.
+                self.publish_state()
                 if (self._is_stream_target(failed_mode)
                         and queued_stream_end is not None):
                     self._queued_stream_end = queued_stream_end
@@ -1374,8 +1453,8 @@ class ArmControllerNode(Node):
             problems.append('i2c not ok')
         if not self._firmware_protocol_ok:
             problems.append('firmware protocol v3 not verified')
-        if self._state == ArmState.STATE_MOVING:
-            problems.append('arm moving')
+        if self._pending_motion or self._active_wire_id != 0:
+            problems.append('arm command active')
         if problems:
             response.success = False
             response.message = 'reset blocked: ' + ', '.join(problems)

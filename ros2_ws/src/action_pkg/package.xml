@@ -15,7 +15,7 @@
   <depend>sensor_msgs</depend>
   <depend>std_srvs</depend>
   <depend>action_interfaces</depend>
-  <exec_depend>joy</exec_depend>
+  <exec_depend>joy_linux</exec_depend>
 
   <!-- NOTE: smbus2 is required at runtime for I2C. It is a PyPI package, not a
        ROS package, so install it in your workspace venv / system Python:

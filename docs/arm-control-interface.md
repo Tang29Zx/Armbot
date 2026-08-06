@@ -179,8 +179,11 @@ STOP ('S'):
 `U/G` 是 1、2 号舵机的单通道滚动伺服，用于 Xbox 夹爪和腕转。每次只允许一个
 直接舵机流；`U` 收到新绝对 raw 目标后更新移动参考，STM32 以 `25 Hz/40 ms`
 生成连续位置小段。`G` 停止接收移动参考，平滑到最后目标并在反馈稳定三轮后完成。
-相邻目标最大跨度为 `150 raw`，超出时以 `STREAM_STEP_TOO_LARGE` 非锁存拒绝且不
-覆盖旧目标。`U` 超过 watchdog 未更新时按当前速度制动，报告
+当前部署固件的相邻目标上限为 `12 deg`；夹爪当前 `200..700 raw` 映射中等价于
+`50 raw/0.1` 规范化位移。超出时以 `STREAM_STEP_TOO_LARGE` 非锁存拒绝且不覆盖
+旧目标。主机以最后一条匹配 `PHASE_EXECUTING` 的已安装目标为基线，将夹爪和腕转
+候选都限制在 `9 deg` 内；尚未确认的 10 Hz tick 不得继续累积目标。`U` 超过
+watchdog 未更新时按当前速度制动，报告
 `STOPPING/STREAM_TIMEOUT`，停止后要求重新 Home。`P` 语义不变，继续供 Home、
 探针和非流式调用使用。
 
@@ -238,6 +241,10 @@ F 收包：ACCEPTED / EXECUTING
 不超过 `10 raw` 且相邻反馈变化不超过 `2 raw`，连续三轮成立。`T/F` 与 `U/G`
 互斥，Home、一次性 `A/P`、`H/S` 都会使活动流失效。
 
+Xbox 夹爪结束流时使用 `H`：controller 必须立即清除已打开的 gripper stream 状态，
+等待匹配 `H/COMPLETED` 后再下发排队的腕转或机械臂命令。腕转仍使用 `G` 平滑结束；
+通用 `MODE_GRIPPER_SERVO_END` 接口保留给显式调用方和固件诊断。
+
 `NO_IK_SOLUTION` 与 `STREAM_STEP_TOO_LARGE` 都只拒绝当前 `T`，不覆盖最后有效
 `q_goal`。控制器只有看到匹配 T 的 `EXECUTING` 才发送下一条流式目标，并先保存该
 目标为“最后已安装可达坐标”。队列分别保存最新 T 与 END 标志，END 不得覆盖尚未
@@ -248,9 +255,23 @@ F 收包：ACCEPTED / EXECUTING
 下发的命令没有 `wire_command_id`；兼容入口的 `sequence_id=0` 仍会获得非零
 `wire_command_id`，因此两种 ID 不能混用。
 
+排队但尚未下发的命令也不得改写公开的 `ArmState.sequence_id/state/command_phase`；
+这些字段始终描述当前已下发的硬件生命周期。否则跨模式命令或流 END 在等待期间会
+制造 `MOVING + PHASE_NONE`，即使没有对应的活动硬件命令也无法 Reset。
+
 ROS 只有在 `wire_command_id` 与当前活动命令匹配时才接受
 `ACCEPTED/EXECUTING/COMPLETED/FAILED`。ID 不匹配的有效状态只能证明 I2C 链路
 存活，不能清除命令 watchdog，也不能改变当前命令结果。
+
+控制器包含两级有界等待：未收到匹配 `ACCEPTED/EXECUTING` 时使用
+`command_timeout_sec` 的 ACK watchdog；ACK 后仍未收到终态时，使用
+`duration_sec + command_timeout_sec` 的终态 watchdog。`F/G` 不携带运动时长，且
+需要从当前规划速度减速并满足稳定完成条件，因此使用
+`max_duration_sec + command_timeout_sec`，不能把零 wire duration 解释成只允许 ACK
+余量。终态超时会清除活动命令和队列并进入 `ERR_CMD_TIMEOUT`，避免永久假
+`MOVING`。若公开状态为 `MOVING`，但内部既无 pending 命令也无活动
+`wire_command_id`，轮询会自动协调回 `IDLE`；Reset 也只按真实活动命令判断是否
+阻止，不按公开状态字面值阻止。
 
 `READY/wire_command_id=0` 表示固件启动后就绪。如果控制器已经见过非零 ID，却再次
 收到该状态，则按固件重启处理：清除活动命令、禁用遥操，并要求清错和重新 Home。
@@ -370,7 +391,8 @@ uint32 sequence_id
 - `MODE_GRIPPER`：使用 `gripper_position`，规范范围 `[0, 1]`，其中
   `0` 表示完全张开、`1` 表示完全闭合；
 - `MODE_GRIPPER_SERVO`：使用相同夹爪目标但转换为 `U` 滚动目标；对应
-  `MODE_GRIPPER_SERVO_END` 发送 `G`；
+  `MODE_GRIPPER_SERVO_END` 仍保留 `G` 协议入口，但 Xbox teleop 的松开和模式切换
+  使用有界的 `MODE_GRIPPER_STOP/H`，不再等待 `G(gripper)` 的反馈稳定条件；
 - `MODE_GRIPPER_STOP`：忽略位置和时长，只停止映射到 `gripper` 的舵机当前运动；
   它必须抢占未完成的 `MODE_GRIPPER`，但不能替代 `MODE_STOP` 的整臂安全停止；
   若停止帧在有界重试后仍写入失败，控制节点进入独立的锁存错误
@@ -432,6 +454,8 @@ string error_message
   `error_code` 和失败命令的 `sequence_id`；下一条有效命令可直接执行，不需要调用
   `/arm/reset_error`。
 - `STREAM_STEP_TOO_LARGE/0x0026` 与 NO_IK 一样只拒绝当前流式候选；
+  controller 必须先发布该失败命令的 `sequence_id/PHASE_FAILED/error_code` 快照，
+  再下发同一流中已排队的 END，避免 END 的 `MOVING` 状态覆盖拒绝沿；
   `STREAM_TIMEOUT/0x0027` 和 `SERVO_DEADLINE_MISSED/0x0028` 会先发布
   `PHASE_STOPPING`，随后进入锁存错误并要求 Home。
 

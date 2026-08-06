@@ -11,6 +11,6 @@ export PYTHONPATH="/usr/lib/python3/dist-packages${PYTHONPATH:+:${PYTHONPATH}}"
 
 cd "${workspace_dir}"
 colcon build \
-    --packages-select action_interfaces action_pkg \
+    --packages-select action_interfaces action_pkg vla_dataset \
     --symlink-install \
     "$@"

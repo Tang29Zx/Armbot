@@ -78,10 +78,10 @@ def test_right_stick_horizontal_controls_wrist_roll_by_default():
     assert right.wrist_roll == pytest.approx(math.radians(-20.0))
 
 
-def test_cartesian_has_priority_over_gripper():
+def test_gripper_has_priority_over_cartesian():
     target, mode = _integrate(Target(), [0, 1, 0, 0, -1, 1])
-    assert mode == MODE_ARM
-    assert target.gripper == 0.0
+    assert mode == MODE_GRIPPER
+    assert target.gripper == 0.5
 
 
 def test_rt_closes_and_lt_opens_gripper():

@@ -20,6 +20,8 @@
 - 当前 I2C v3 保持固定 32 字节布局：ROS `MODE_CARTESIAN_SERVO=5`/`T` 更新
   滚动笛卡尔目标，`MODE_CARTESIAN_SERVO_END=6`/`F` 正常结束流；`H` 停指定舵机，
   `S` 全局急停。普通运动要求 ROS/STM32 版本一致，`S` 保留跨版本停止能力。
+- VLA 数据采集 v1 使用“每个 episode 一个 rosbag2 + manifest”作为不可变事实层；
+  recorder 只订阅图像、Joy、命令、原始状态和滤波状态，不打开 I2C、不发布运动命令。
 
 ## Xbox 手柄映射
 
@@ -45,6 +47,70 @@
 不需要清错或 Home。其他错误仍保持原安全恢复流程。
 
 ## 已验证记录
+
+- 2026-08-04：本机 SSH 新增 `Host rdk`，目标为 `sunrise@192.168.3.147`，固定使用
+  `~/.ssh/id_ed25519_rdk_armbot`，并以 `ProxyCommand none` 绕过系统级 SOCKS 代理。
+  `ssh -G rdk` 已确认解析正确；新地址 TCP/22 已可达，在线读取到的 RSA、ECDSA、
+  ED25519 主机指纹与旧地址记录完全一致，确认是同一块 RDK。已安全写入新地址的
+  ED25519 主机键；用户通过 `ssh-copy-id` 恢复公钥授权，`ssh rdk` 已可用。
+- 2026-08-04：Windows 用户 `Tang29Zx` 的 `~/.ssh/config` 也已将 `Host rdk` 更新为
+  `sunrise@192.168.3.147`，继续使用 Windows 独立密钥 `~/.ssh/id_ed25519_rdk`。原
+  `authorized_keys` 文本中虽能搜索到该公钥，但 `ssh-keygen` 无法将其识别为有效行；
+  保留其他有效密钥并强制追加一份格式正确的 Windows 公钥后，Windows OpenSSH
+  `BatchMode` 实测返回 `windows_ssh_ok`。新地址的已核验 ED25519 主机键已写入 Windows
+  `known_hosts`。
+- 2026-08-04：Xbox Wireless Controller `C0:D6:D5:E7:C2:7A` 已在 RDK 配对、信任并
+  连接，受控断开后可重新连接，Linux 会恢复 `/dev/input/js0`。离线修复后原 SDL
+  `ros-humble-joy` 已缺失；直接恢复它会连带升级厂商镜像的 systemd、udev 和 Mesa，
+  因此改用只新增两个 ROS 包且不升级系统组件的 `ros-humble-joy-linux`。独立测试中
+  `joy_linux_node` 成功打开 `/dev/input/js0`，以约 19.65 Hz 发布
+  `sensor_msgs/msg/Joy`，8 个轴、16 个按钮；测试没有启动 controller、teleop 或 I2C。
+  `arm_xbox_control.launch.py` 与 `action_pkg/package.xml` 已切换到 `joy_linux`，RDK
+  安装态软链接和 launch 解析已验证生效。
+- 2026-08-04：RDK 离线修复后 `colcon` 命令缺失，`scripts/build-rdk-ros2.sh` 当前不能
+  重建 workspace；现有 `--symlink-install` 使本轮 launch 修改直接生效，但后续正式
+  构建仍需恢复 `python3-colcon-common-extensions`。该包模拟安装为新增 36 个包、无升级
+  或删除，本轮未扩大安装范围；未解决项记录在 `DEBUG.md`。
+- 2026-08-04：RDK 离线修复后的可观测验收通过：根分区为 `clean`，当前和上次启动
+  无新增 ext4/I/O 错误；`std_msgs`、`sensor_msgs`、`std_srvs` 均为 `ii`，包审计与
+  文件校验无异常。`config/fastdds.xml` 已加入 `PREALLOCATED_WITH_REALLOC` 并把 UDP
+  allowlist 更新为 `192.168.3.147`，板端正式文件与仓库 SHA-256 一致，旧配置备份在
+  RDK `~/.local/state/armbot/config-backups/fastdds-20260804-before-wifi-fix.xml`。
+  1280×720 MJPEG 相机连续约 35 秒发布 `CompressedImage`，实测约 29.88 Hz，无 Fast
+  CDR 崩溃。默认 calibration 文件仍缺失，不阻塞当前图像采集，但不能据此宣称相机
+  已完成几何标定；机械臂实机控制链也仍需独立验收。
+- 2026-08-03：`vla_dataset` 的 8 个包文件和采集规格已同步到 RDK
+  `/home/sunrise/Armbot`，逐文件 SHA-256 与本地一致；README 和
+  `scripts/build-rdk-ros2.sh` 也已同步，后者会随控制包一起构建 recorder。远端只构建
+  `vla_dataset`，结果成功，6 项测试全部通过，安装态 `record_episode --help` 正常。
+  同步和验证期间未启动 controller、teleop、Joy、相机或 rosbag。RDK 已确认
+  `/dev/video0` 支持 MJPEG 1280×720@30 fps，`hobot_usb_cam` 已安装，用户属于
+  `video` 组，根分区剩余约 43 GB；真实带消息 episode 尚未录制。
+- 2026-08-03：用户明确说明当前实机控制链尚未完成最终验收。后续正式数据的 manifest
+  仍应记录实际烧录 HEX SHA-256（可暂记 `unknown`）和 Armbot commit，且不能把当前
+  控制状态描述为已验收。
+- 2026-08-03：RDK 根分区 `/dev/mmcblk1p2` 存在 ext4 元数据损坏：内核记录 inode
+  checksum invalid，`tune2fs` 为 `clean with errors`，错误计数 56；ROS 的
+  `sensor_msgs`/`std_srvs` introspection 库和一个生成的 C 文件校验失败，
+  `std_msgs` 原已 half-installed。官方 4.9.1 临时 overlay 配合 Fast DDS
+  `PREALLOCATED_WITH_REALLOC` 已把 1280×720 MJPEG `/image` 验证到约 29.9 Hz，但
+  正式重装被坏 inode 的 `EUCLEAN` 中断。损坏文件备份在 RDK
+  `~/.local/state/armbot/package-backups/20260803-ros-msg-corruption`；必须先离线
+  `fsck.ext4 -f /dev/mmcblk1p2`，再恢复三个 ROS 包并部署 DDS 配置，修复前暂停正式
+  VLA 采集。
+- 2026-08-03：RDK 当前根盘经 sysfs 确认为可拔出的 SD/TF 卡，根分区是
+  `/dev/mmcblk1p2`。离线 fsck 前的源码与 DDS 配置只读备份位于本机
+  `/home/tang/projects/rdk-recovery-20260803-1808`；排除了 `.git` 和可重建的
+  `ros2_ws/build/install/log`，共 268 个文件、约 7.6 MB。
+- 2026-08-03：该 RDK 镜像的 `/etc/fstab` 未配置根分区，启动后 `/` 已是 rw，
+  `systemd-fsck-root.service` 因条件不满足不会检查根盘；不能依赖普通重启自动修复。
+  对 `/dev/mmcblk1p2` 的安全 fsck 必须在 TF 卡作为非启动盘、未挂载时执行。
+- 2026-08-03：新增独立 `vla_dataset` 被动 episode recorder。固定记录 `/image`、
+  `/joy`、`/arm/command`、`/arm/state`、`/arm/state_filtered`，先原子写入
+  `recording` manifest，Ctrl+C 等待 rosbag2 完成收尾后标记 `unreviewed`，异常则
+  标记 `failed`。本机 ROS 2 Humble 构建和 6 项定向测试通过；真实 rosbag2 烟雾
+  测试生成 sqlite3、`metadata.yaml` 和 manifest，SIGINT 正常退出。测试时没有话题
+  发布者，因此消息数为 0；RDK 相机与控制话题实录仍待完成。
 
 - 2026-08-01：RDK controller 已部署 I2C 同周期快速读重试：只对
   `EAGAIN/EREMOTEIO` 最多尝试 3 次、间隔 5 ms，`ETIMEDOUT` 不重试；耗尽后
@@ -74,6 +140,96 @@
   `/home/sunrise/Armbot-direct-servo-pre-20260801-005644.tar.gz`，SHA-256 为
   `2db83642d011df487be19c7fba7916c054f0e1255bb249593e577e4828c1d761`。部署期间
   控制栈保持停止；配套 STM32 HEX 尚未刷写，所以该记录不代表实机运动已验收。
+
+- 2026-08-05：用户要求夹爪操作不再依赖摇杆回中；映射已改为有效 RT/LT 输入
+  优先于笛卡尔和腕转输入，模式切换仍先结束上一条流。夹爪接触锁存后会忽略持续
+  按住的闭合输入，使摇杆无需先释放 RT 仍可移动机械臂。用户随后明确要求取消 A
+  初次使能的输入中立安全门；A 现只检查输入新鲜、同步状态与机械臂状态，非零输入
+  会在使能后立即运动，NO_IK/直接舵机拒绝后的自动恢复仍要求输入回中。RDK 源码、
+  测试和文档已同步，隔离回归为
+  `114 passed、1 skipped`；两次部署前备份分别位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-gripper-priority` 和
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-enable-active-input`。
+  部署时控制栈已停止，新逻辑将在下次启动时生效，仍待实机验收。
+
+- 2026-08-05：单栈只读证实手柄完全中立且无 `/arm/command` 时，controller 仍为
+  `MOVING/PHASE_NONE/seq=1113`。根因是未下发队列命令提前覆盖公开生命周期，加上
+  ACK 后缺少终态 watchdog，丢失终态会永久保留活动 wire ID；Reset 又按公开
+  `STATE_MOVING` 阻止恢复。修复后队列不再改写公开状态，活动命令必须在
+  `duration_sec + command_timeout_sec` 内到达终态，否则清空活动/队列并报告
+  `ERR_CMD_TIMEOUT`；孤立 `MOVING` 自动回 `IDLE`，Reset 只阻止真实活动命令。
+  新增 6 个回归，RDK 隔离 Domain 230 完整测试为 `120 passed、1 skipped`；源码、
+  测试和契约已同步，备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-fake-moving-lifecycle`。
+  生产进程尚未重启，实机连续操作验收待完成。
+
+- 2026-08-05：新栈启动后另一种持续 `MOVING` 被证实为真实命令流：未触碰的
+  `joy_linux` 扳机轴启动为 `0.0`，映射将其当作半按，teleop 以约 10 Hz 持续发布
+  `MODE_GRIPPER_SERVO`，固件正常返回 `EXECUTING/error=0`。teleop 已改为分别等待
+  两个扳机首次出现 `+1.0` 释放端点，在此之前将未初始化轴按中立处理；Joy 超时或
+  无效后重新初始化。新增 2 个回归，RDK 隔离完整测试为
+  `122 passed、1 skipped`。源码、测试和文档已同步，备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-trigger-init`；当前旧进程
+  尚未重启，待安全重启及实机确认。
+
+- 2026-08-05：扳机修复重启后，`F/wire_id=185` 在 3 秒时被主机终态 watchdog
+  提前报 `0x0016`，固件约 4.8 秒后才正常 `COMPLETED`，期间下一条 T 被拒绝为
+  `ARM_NOT_READY`；当前 `wire_id=367` 再现同一签名。根因是 F/G 无 duration，
+  主机误用 0+3 秒，而固件允许最长 30 秒运动收敛。controller 已改为 F/G 使用
+  `max_duration_sec + command_timeout_sec`，普通命令仍维持 duration 加 ACK 余量；
+  新增失败回归，RDK 隔离完整测试为 `123 passed、1 skipped`。controller、测试和
+  契约已同步，备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-stream-end-terminal-window`；
+  17:19 已重启单栈并完成受控实机验收：启动扳机均为 `0.0` 时静置无假命令；Home
+  成功；`T3～7 → F8` 与快速恢复输入 `T9 → F10 → T11 → F12` 均按序完成，两个
+  F 分别约 0.387/0.405 秒到达 `COMPLETED/error=0`。最终
+  `SUCCEEDED/COMPLETED/seq=12/position_valid=true`、teleop disabled，静置 5 秒无
+  `/arm/command`。测试中一次误用禁用的 MODE_JOINT 被安全拒绝、无硬件运动并已
+  Reset，不属于产品复现错误。
+
+- 2026-08-05：用户 17:27 重启单栈后第一条 `seq=1/wire_id=1` 被固件拒绝为
+  `ARM_NOT_READY`，同时 I2C/反馈正常且 Joy 无命令。根因是 real teleop 过去只凭
+  三帧关节接近 Home 就在进程启动时自动同步，物理姿态却不能证明 STM32 规划器
+  ready。已移除实机启动自动同步；每次启动必须显式 Home，并且只有匹配完成、有效
+  反馈及 Home 容差内连续三帧同时满足才允许 A。输入中立门仍保持取消。旧行为失败
+  回归与修复后完整测试已完成，RDK 隔离结果 `123 passed、1 skipped`。源码、测试和
+  文档已部署，备份为
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-explicit-home-on-start`；部署时
+  控制栈为空，`action_pkg` 已重建且安装层与源码哈希一致。未自动启动，待显式 Home
+  流程实机验收。
+
+- 2026-08-05：显式 Home 现场 `seq=602` 已完成，但关节反馈约 4 分钟后才稳定进入
+  Home 容差；等待期间 A 错误显示 `run home first`。teleop 已将 Home/reset pending
+  提示前置，并为固件完成后的姿态验证增加 `3 s` 期限；超时会记录实际/期望关节角、
+  保持 unsynced、结束静默等待并允许再次显式 Home，不会放宽反馈安全门。修复已部署
+  并重建，RDK 完整测试为 `125 passed、1 skipped`，备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-home-feedback-verification`；
+  当时运行中的 PID 29741 仍是旧内存代码，需重启控制栈后生效。
+
+- 2026-08-05：首次两次 Home 的 elbow 误差为 `5.04 deg`，仅越过原 `5.00 deg`
+  阈值 `0.04 deg`，小于约 `0.24 deg/raw tick` 的反馈量化。Home 容差已放大为
+  `5.25 deg` 并部署，完整测试 `126 passed、1 skipped`，备份为
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-home-tolerance-5p25`。同一现场
+  后续确有一次固件 v3 包无效后回到 `READY/wire_id=0` 的独立重启事件；这种事件仍
+  必须显式 Reset，不能自动清错。部署时 PID 33642 仍加载旧 `5.00 deg`，需重启生效。
+
+- 2026-08-05：夹爪流出现 26 次连续 `STREAM_STEP_TOO_LARGE` 后进入流超时，随后
+  `G(gripper)` 33 秒无终态。controller 同轮询下发排队 END 覆盖了公开失败沿，
+  teleop 未能暂停并继续累计目标。修复以最后匹配 `PHASE_EXECUTING` 的直接目标
+  为基线，把夹爪和腕转候选限制在 `9 deg`，并在 END 下发前显式发布拒绝快照；直接
+  拒绝会回滚、只结束一次流并等待输入回中。新增 4 个回归，RDK 正式源码完整测试
+  `130 passed、1 skipped`，代码、配置、测试与文档已部署；备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-direct-stream-confirmed-step`。
+  生产 PID 35877/35889/35891 未重启，仍需用户重启后完成实机验收。
+
+- 2026-08-05：用户重启确认限步参数生效后，所有夹爪 `U` 均正常
+  `EXECUTING/error=0`，但 `G(gripper) seq=277/wire_id=161` 33 秒无终态，使后续
+  机械臂命令被跨模式队列阻塞并最终报 `0x0016`。Joy 中立且同期无内核 I2C 错误。
+  Xbox 夹爪松开/切换/拒绝现改用有界 `MODE_GRIPPER_STOP/H`，controller 同时清除
+  gripper stream 并等待 H 完成后放行机械臂；腕转仍保留 G。新增直接
+  `U → H → A` 回归，RDK 正式源码完整测试 `131 passed、1 skipped`，备份为
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-gripper-halt-end`。生产 PID
+  47737/47749/47751 未重启，待用户重启后实机验收。
 
 - 2026-07-31：RDK `/home/sunrise/Armbot` 已部署 VLA-only 的 3 点因果中值加
   One Euro 状态滤波，以及 Xbox `0.30 s` 流 watchdog。One Euro 默认参数为
