@@ -1,0 +1,14 @@
+arm_command_mux_node:
+  ros__parameters:
+    output_topic: /arm/command
+    teleop_command_topic: /arm/command/teleop
+    vla_command_topic: /arm/command/vla
+    heartbeat_topic: /vla/heartbeat
+    state_topic: /arm/state
+    teleop_enabled_topic: /arm/teleop_enabled
+    teleop_synced_topic: /arm/teleop_synced
+    vla_enabled_topic: /arm/vla_enabled
+    enable_service: /arm/set_vla_enabled
+    heartbeat_timeout_sec: 0.30
+    state_timeout_sec: 0.50
+

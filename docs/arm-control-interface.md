@@ -64,6 +64,24 @@ STOP
 `ArmCommand`，再经过与类型化命令相同的校验和安全路径；兼容状态则由 ROS 根据
 v3 二进制状态生成。
 
+### 2.2.1 Xbox/VLA 排他复用
+
+运行 `arm_vla_control.launch.py` 时，controller 的稳定输入仍是 `/arm/command`，
+但该话题只能由 RDK 本地 `arm_command_mux_node` 发布。上游拆分为：
+
+| Topic / service | 类型 | 用途 |
+| --- | --- | --- |
+| `/arm/command/teleop` | `ArmCommand` | Xbox 遥操候选命令 |
+| `/arm/command/vla` | `ArmCommand` | PC VLA 候选命令 |
+| `/vla/heartbeat` | `std_msgs/msg/Empty` | PC 控制链健康心跳 |
+| `/arm/vla_enabled` | `std_msgs/msg/Bool` | mux 当前所有权，transient-local |
+| `/arm/set_vla_enabled` | `std_srvs/srv/SetBool` | 显式获取或归还 VLA 控制权 |
+
+mux 默认选择 Xbox。VLA 获取控制权要求 Xbox disabled、Home 已验证、原始状态和
+心跳新鲜且机械臂无错误；控制期间心跳超过 `300 ms`、状态超过 `500 ms`、反馈
+无效或进入 ERROR/ESTOP 时，mux 用新的非零序号发布 `MODE_STOP` 并撤销 VLA。
+旧 `arm_xbox_control.launch.py` 与新 launch 不得同时运行。
+
 ### 2.3 I2C v1 与 v3
 
 共同硬件边界：

@@ -43,7 +43,14 @@ jobs:
         run: |
           while IFS= read -r -d '' script; do
             bash -n "$script"
-          done < <(find rdk_video_push/scripts -type f -name '*.sh' -print0)
+          done < <(find rdk_video_push/scripts scripts docker -type f -name '*.sh' -print0)
+
+      - name: Check VLA Docker Compose configuration
+        run: >-
+          docker compose
+          --env-file docker/vla-runtime/.env.example
+          -f docker/vla-runtime/compose.yml
+          config --quiet
 
       - name: Run unit tests
         run: python -m pytest -q
@@ -76,5 +83,5 @@ jobs:
       - name: Build and test ROS 2 packages
         uses: ros-tooling/action-ros-ci@v0.4
         with:
-          package-name: action_interfaces action_pkg chassis_control
+          package-name: action_interfaces action_pkg chassis_control vla_runtime
           target-ros2-distro: humble

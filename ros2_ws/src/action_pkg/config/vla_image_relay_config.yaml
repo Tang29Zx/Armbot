@@ -1,0 +1,6 @@
+vla_image_relay_node:
+  ros__parameters:
+    input_topic: /image
+    output_topic: /vla/image
+    output_rate_hz: 10.0
+    max_input_age_sec: 0.50

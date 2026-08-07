@@ -15,6 +15,7 @@ import pytest
 import rclpy
 from rclpy.parameter import Parameter
 from sensor_msgs.msg import Joy
+from std_msgs.msg import Bool
 
 
 def _joy(*, axes=None, buttons=None):
@@ -116,6 +117,16 @@ def test_invalid_joy_disables_and_loses_sync(shadow_node):
     shadow_node._joy_callback(_joy(buttons=pressed))
     assert shadow_node._enabled
     shadow_node._joy_callback(_joy(axes=[0.0] * 5))
+    assert shadow_node._enabled is False
+    assert shadow_node._synced is False
+
+
+def test_vla_acquisition_forces_teleop_to_require_home(shadow_node):
+    shadow_node._synced = True
+    shadow_node._enabled = True
+
+    shadow_node._vla_enabled_callback(Bool(data=True))
+
     assert shadow_node._enabled is False
     assert shadow_node._synced is False
 

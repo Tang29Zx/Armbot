@@ -1,0 +1,38 @@
+vla_bridge_node:
+  ros__parameters:
+    policy_host: 127.0.0.1
+    policy_port: 8000
+    prompt: "抓取药盒"
+    shadow_mode: true
+
+    image_topic: /vla/image
+    state_topic: /arm/state_filtered
+    raw_state_topic: /arm/state
+    command_topic: /arm/command/vla
+    heartbeat_topic: /vla/heartbeat
+    vla_enabled_topic: /arm/vla_enabled
+
+    control_rate_hz: 10.0
+    policy_rate_hz: 2.0
+    max_actions_per_chunk: 4
+    max_image_age_sec: 0.50
+    max_state_age_sec: 0.25
+    max_policy_age_sec: 1.50
+    policy_timeout_sec: 2.00
+    stream_watchdog_sec: 0.30
+
+    # The model was trained on next-100-ms held-target deltas. Start hardware
+    # rollouts at half scale; increase to 1.0 only after shadow validation.
+    action_scale: 0.50
+    action_abs_limits: [0.31, 0.31, 0.31, 0.0, 0.035]
+    action_deadbands: [0.015, 0.015, 0.015, 0.01, 0.003]
+    gripper_deadband: 0.02
+    gripper_max_step: 0.075
+    gripper_contact_min_progress: 0.02
+    gripper_contact_min_gap: 0.04
+    gripper_contact_stable_delta: 0.006
+    gripper_contact_stable_samples: 3
+
+    home_target: [15.0, 0.0, 2.0, -54.48]
+    pitch_limits_deg: [-90.0, 90.0]
+    wrist_roll_limits_rad: [-1.5707963268, 1.5707963268]

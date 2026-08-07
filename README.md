@@ -29,6 +29,14 @@ ros2 run vla_dataset record_episode \
 `--firmware-sha256 <实际烧录固件的64位SHA-256>`；省略时 manifest 记录为
 `unknown`。
 
+## VLA 在线推理
+
+Arch/Ubuntu PC 通过 Docker 运行固定的 Ubuntu 22.04 + ROS 2 Humble bridge，
+使用 Fast DDS 与 RDK 双向通信，并由独立 GPU 容器运行 OpenPI。部署、shadow 验收、
+控制权切换和故障注入流程见
+[`docs/vla-runtime-docker.md`](docs/vla-runtime-docker.md)。默认配置只做 shadow
+推理，不发布实机命令。
+
 ## Git Hooks
 
 默认分支的 GitHub Ruleset 为仓库管理员保留 `Always bypass`，便于管理员在修改 README、文案等低风险内容或处理紧急情况时直接推送。功能代码仍推荐通过功能分支和 Pull Request 合并。

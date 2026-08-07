@@ -86,14 +86,20 @@ class ArmTeleopNode(Node):
         enabled_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
         self._enabled_pub = self.create_publisher(
             Bool, '/arm/teleop_enabled', enabled_qos)
+        self._synced_pub = self.create_publisher(
+            Bool, '/arm/teleop_synced', enabled_qos)
         self._joy_sub = self.create_subscription(
             Joy, joy_topic, self._joy_callback, 10)
 
         self._state_sub = None
+        self._vla_enabled_sub = None
         self._reset_client = None
         if not self._shadow:
             self._state_sub = self.create_subscription(
                 ArmState, '/arm/state', self._state_callback, 10)
+            self._vla_enabled_sub = self.create_subscription(
+                Bool, '/arm/vla_enabled', self._vla_enabled_callback,
+                enabled_qos)
             self._reset_client = self.create_client(
                 Trigger, '/arm/reset_error')
 
@@ -169,6 +175,7 @@ class ArmTeleopNode(Node):
         self._last_tick = time.monotonic()
         self._timer = self.create_timer(1.0 / rate, self._control_tick)
         self._publish_enabled()
+        self._publish_synced()
         if self._shadow:
             self.get_logger().info(
                 'arm teleop started in shadow mode; waiting for A enable')
@@ -446,6 +453,7 @@ class ArmTeleopNode(Node):
                     self._home_completion_time = None
                     self._home_failure_reason = ''
                     self._synced = True
+                    self._publish_synced()
                     self.get_logger().info(
                         'home feedback verified; target synchronized')
             elif self._home_completion_seen:
@@ -769,6 +777,7 @@ class ArmTeleopNode(Node):
             self._target = target
             self._last_successful_arm_target = target
             self._synced = True
+            self._publish_synced()
             self.get_logger().info(
                 'shadow home completed; target synchronized')
         else:
@@ -975,6 +984,7 @@ class ArmTeleopNode(Node):
     def _lose_sync(self, reason):
         was_synced = self._synced
         self._synced = False
+        self._publish_synced()
         self._no_ik_waiting_neutral = False
         self._arm_targets_by_seq.clear()
         self._direct_targets_by_seq.clear()
@@ -999,6 +1009,14 @@ class ArmTeleopNode(Node):
 
     def _publish_enabled(self):
         self._enabled_pub.publish(Bool(data=self._enabled))
+
+    def _publish_synced(self):
+        self._synced_pub.publish(Bool(data=self._synced))
+
+    def _vla_enabled_callback(self, message):
+        if message.data:
+            self._lose_sync(
+                'VLA acquired control; Home is required before teleop resumes')
 
 
 def main(args=None):

@@ -17,6 +17,12 @@ Shadow 模式只订阅 `/joy_sim`，只发布 `/arm/teleop_command` 和
 `/arm/teleop_emergency_stop`，不会调用真实 reset service，也不会发布
 `/arm/command`。
 
+VLA 联机模式改用 `arm_vla_control.launch.py`：teleop 命令被 remap 到
+`/arm/command/teleop`，再由 RDK 本地 mux 与 PC 的 `/arm/command/vla` 排他选择。
+VLA 获得控制权时 teleop 会立即 disabled 并失去同步；VLA 归还后必须重新 Home，
+不能沿用模型的中间目标直接恢复 Xbox。完整 Docker 和验收流程见
+[`vla-runtime-docker.md`](vla-runtime-docker.md)。
+
 ## 输入与按键
 
 输入类型为 `sensor_msgs/msg/Joy`。RDK 当前 Xbox 映射如下：

@@ -3,7 +3,7 @@
 ## 项目概况
 
 - 项目名：Armbot
-- 最近更新：2026-08-01
+- 最近更新：2026-08-07
 - 技术栈：ROS 2 Humble、Python 3.10、I2C
 - 构建与依赖：colcon、ament、APT、pip
 - 主要目录：`ros2_ws/src`、`rdk_video_push`、`docs`、`.github/workflows`
@@ -47,6 +47,26 @@
 不需要清错或 Home。其他错误仍保持原安全恢复流程。
 
 ## 已验证记录
+
+- 2026-08-07：已为 Arch/Ubuntu PC → Fast DDS Domain 29 → RDK 的 OpenPI 在线
+  推理链新增 Docker 适配源码。GPU OpenPI server 与 ROS 2 Humble bridge 分容器；
+  模型 websocket 只绑定 PC loopback，只有 bridge 使用 host network。RDK 侧新增
+  10 Hz 最新压缩帧 `/vla/image` relay、Xbox/VLA 排他 command mux、显式 Home
+  获取门和 300 ms heartbeat watchdog；shadow 默认不发布 heartbeat，因此不可能
+  获取实机控制权。动作调度保持训练语义，按固件回执提交 held target、限制单次动作
+  和 chunk、在流族切换前发送 END/STOP，并对命令失败锁存控制故障。纯调度、图像和
+  OpenPI wire-format 测试为 `10 passed`，Ruff、Python AST、YAML、XML、shell syntax
+  与 `git diff --check` 均通过，msgpack 字节与 OpenPI client 完全一致。当前电脑没有
+  Docker/ROS 2，且用户明确本轮不连接 RDK，所以镜像构建、ROS 包回归、DDS 联通和
+  故障注入仍待后续环境验收；本轮未提交、推送、部署或启动控制栈。
+
+- 2026-08-07：用户复核发现
+  `episode_20260806T092330Z_20584923` 属于夹住抬升途中报错后手动停止的数据，已从
+  42 条候选训练集中排除。当前训练数据集为
+  `/home/tang/Projects/armbot/vla_data/lerobot/local/armbot_pi05_fixed_pick_41`，共
+  41 episodes、15,411 帧；OpenPI 配置和实验名使用
+  `local/armbot_pi05_fixed_pick_41` / `fixed-pick-41-v1`。旧 42 条导出保留为处理历史，
+  不能再作为当前 checkpoint 的数据口径。
 
 - 2026-08-07：本轮定点药盒抓取 61 条原始 episode 已完成统一 QC 和 OpenPI/LeRobot
   v2.1 转换。外部处理清单覆盖全部数据：28 条 `success_usable`、14 条

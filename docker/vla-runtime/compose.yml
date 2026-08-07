@@ -1,0 +1,56 @@
+name: armbot-vla
+
+services:
+  openpi-server:
+    image: armbot-openpi-server
+    build:
+      context: ${OPENPI_ROOT:?set OPENPI_ROOT in .env}
+      dockerfile: scripts/docker/serve_policy.Dockerfile
+    init: true
+    tty: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:${POLICY_PORT:-8000}:8000"
+    volumes:
+      - ${OPENPI_ROOT}:/app
+      - ${OPENPI_DATA_HOME:?set OPENPI_DATA_HOME in .env}:/openpi_assets
+      - ${OPENPI_CHECKPOINT_ROOT:?set OPENPI_CHECKPOINT_ROOT in .env}:/checkpoints:ro
+    environment:
+      OPENPI_DATA_HOME: /openpi_assets
+      IS_DOCKER: "true"
+      XLA_PYTHON_CLIENT_MEM_FRACTION: ${XLA_PYTHON_CLIENT_MEM_FRACTION:-0.9}
+      SERVER_ARGS: >-
+        policy:checkpoint
+        --policy.config=${OPENPI_CONFIG_NAME:-pi05_armbot_lora}
+        --policy.dir=/checkpoints/${OPENPI_EXPERIMENT_PATH:-pi05_armbot_lora/fixed-pick-41-v1/9999}
+        --port=8000
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${GPU_DEVICE_ID:-0}"]
+              capabilities: [gpu]
+
+  vla-bridge:
+    image: armbot-vla-bridge
+    build:
+      context: ../..
+      dockerfile: docker/vla-runtime/Dockerfile
+    init: true
+    restart: unless-stopped
+    network_mode: host
+    depends_on:
+      - openpi-server
+    environment:
+      PC_DDS_IP: ${PC_DDS_IP:?set PC_DDS_IP in .env}
+      ROS_DOMAIN_ID: ${ROS_DOMAIN_ID:-29}
+    command:
+      - ros2
+      - launch
+      - vla_runtime
+      - vla_bridge.launch.py
+      - policy_host:=127.0.0.1
+      - policy_port:=${POLICY_PORT:-8000}
+      - shadow_mode:=${VLA_SHADOW:-true}
+      - prompt:=${VLA_PROMPT:-抓取药盒}
