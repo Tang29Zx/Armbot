@@ -19,7 +19,7 @@ from typing import List, Optional
 WHEEL_RADIUS   = 0.0325      # 轮子半径 (m)
 WHEEL_DIST_LR  = 0.130       # 左右轮中心距 (m)，轮距的一半
 WHEEL_DIST_FB  = 0.130       # 前后轮中心距 (m)，轴距的一半
-ENCODER_PPR    = 3924         # 标定值 (2026-07-07，实测 0.8m 修正)
+ENCODER_PPR    = 3924         # 标定值 (2026-08-17 实测验证：推车 1.0m=odom 0.479m 是命令超时未走满，实际 0.5m 一致，PPR 保持原值)
 
 # 运动学常数（预计算）
 _KIN_K = WHEEL_RADIUS / 4.0

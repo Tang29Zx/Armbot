@@ -32,7 +32,8 @@ def mecanum_inverse(angle_deg, speed, rot, drift=False):
     speed, rot: 0~100 的归一化速度
     """
     rad = angle_deg * math.pi / 180
-    sf = 1.0 if rot == 0 else 0.5
+    # 旋转分量不砍半（原 sf=0.5 导致旋转执行只有指令一半 → 转向严重不足 → 地图畸变）
+    sf = 1.0
     s = speed / math.sqrt(2)
     s_sin, s_cos = s * math.sin(rad), s * math.cos(rad)
 
@@ -123,6 +124,7 @@ class LeArmChassisNode(Node):
         self.cmd_timeout = 0.5  # 秒
         self.current_speeds = [0, 0, 0, 0]
         self.target_speeds = [0, 0, 0, 0]
+        self._frame = 0
 
         # ── 发布 /odom ──
         self.odom_pub = self.create_publisher(Odometry, '/odom', 10)
@@ -165,6 +167,13 @@ class LeArmChassisNode(Node):
         # 更新里程计
         self.odo.update()
         p = self.odo.pose
+
+        # ── 临时旋转调试日志（每 50 帧）──
+        if self._frame % 50 == 0:
+            enc = self.driver.get_encoder()
+            self.get_logger().info(
+                f"[DBG] enc={enc} theta={p.theta:.3f} vx={p.vx:.3f} vy={p.vy:.3f} wz={p.wz:.3f}")
+        self._frame += 1
 
         # 发布 /odom
         odom_msg = Odometry()

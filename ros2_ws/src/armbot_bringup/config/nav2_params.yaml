@@ -101,13 +101,13 @@ controller_server:
       min_vel_y: -0.15
       max_vel_x: 0.15
       max_vel_y: 0.15
-      max_vel_theta: 0.8
+      max_vel_theta: 0.4
       min_speed_xy: 0.0
       max_speed_xy: 0.15
       min_speed_theta: 0.0
       acc_lim_x: 0.5
       acc_lim_y: 0.3
-      acc_lim_theta: 1.5
+      acc_lim_theta: 0.8
       decel_lim_x: -0.5
       decel_lim_y: -0.3
       decel_lim_theta: -1.5
@@ -190,9 +190,12 @@ behavior_server:
     robot_base_frame: base_link
     transform_tolerance: 0.3
     simulate_ahead_time: 2.0
-    max_rotational_vel: 1.0
-    min_rotational_vel: 0.2
-    rotational_acc_lim: 3.2
+    max_rotational_vel: 0.5
+    min_rotational_vel: 0.1
+    rotational_acc_lim: 1.6
+    # BackUp 倒车行为限速限距（防止 recovery 倒车撞障碍）
+    backup_vel: -0.08
+    backup_dist: 0.2
 
 # =============================================================================
 # BT Navigator — Behavior Tree for NavigateToPose

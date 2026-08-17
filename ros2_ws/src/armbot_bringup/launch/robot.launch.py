@@ -16,6 +16,7 @@ from launch.actions import (
     IncludeLaunchDescription,
     TimerAction,
 )
+from launch.conditions import IfCondition
 from launch.substitutions import (
     Command,
     LaunchConfiguration,
@@ -46,6 +47,11 @@ def generate_launch_description():
     lidar_motor_arg = DeclareLaunchArgument(
         'lidar_motor_hz', default_value='8.0',
         description='LiDAR motor frequency (Hz)')
+    # use_lidar=false: 不启动 armbot_lidar 自写驱动（由外部官方 ydlidar 驱动启动，
+    # 自写驱动帧乱导致 SLAM 无法建图）
+    use_lidar_arg = DeclareLaunchArgument(
+        'use_lidar', default_value='true',
+        description='Whether to start the armbot_lidar driver')
     # ── URDF: use xacro to process the model description ──
     # Falls back to reading the raw .xacro if xacro is not installed
     # (robot_state_publisher in Humble can parse simple xacro without macros).
@@ -101,16 +107,22 @@ def generate_launch_description():
     # The chassis_control node uses I2C bus 5 (0x34) and the LiDAR uses serial,
     # so there's no actual bus conflict, but the delay gives the OS time to
     # enumerate USB devices.
-    ld = LaunchDescription([
+    actions = [
         lidar_port_arg,
         lidar_baud_arg,
         lidar_motor_arg,
+        use_lidar_arg,
         robot_state_pub,
         chassis_launch,
+    ]
+    # use_lidar=true 时才启动自写雷达驱动
+    actions.append(
         TimerAction(
             period=1.0,
             actions=[lidar_launch],
-        ),
-    ])
+            condition=IfCondition(LaunchConfiguration('use_lidar')),
+        )
+    )
+    ld = LaunchDescription(actions)
 
     return ld

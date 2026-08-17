@@ -233,7 +233,7 @@ def generate_launch_description():
             'transform_tolerance': 0.3,
             'min_frontier_size': 0.5,      # ignore tiny frontiers (meters)
             # Behaviour
-            'return_to_init': True,        # return to start when done
+            'return_to_init': False,       # 探索完原地停（不回起点，避免 recovery 倒车撞障碍）
         }],
     )
 
