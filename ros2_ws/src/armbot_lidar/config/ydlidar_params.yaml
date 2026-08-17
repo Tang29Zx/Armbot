@@ -2,7 +2,7 @@
   ros__parameters:
     # --- Serial configuration ---
     port: "/dev/ttyUSB0"
-    baudrate: 230400
+    baudrate: 115200
 
     # --- Frame ---
     frame_id: "laser"

@@ -34,7 +34,7 @@ def generate_launch_description():
     lidar_port_arg = DeclareLaunchArgument(
         'lidar_port', default_value='/dev/ttyUSB0')
     lidar_baud_arg = DeclareLaunchArgument(
-        'lidar_baudrate', default_value='230400')
+        'lidar_baudrate', default_value='115200')
 
     # ── Robot base ──
     robot_launch = IncludeLaunchDescription(

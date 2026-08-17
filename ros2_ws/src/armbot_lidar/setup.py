@@ -25,6 +25,6 @@ setup(
     license='MIT',
     tests_require=['pytest'],
     entry_points={
-        'console_scripts': [],
+        'console_scripts': ['ydlidar_raw = armbot_lidar.ydlidar_raw_node:main'],
     },
 )

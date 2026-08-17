@@ -9,10 +9,4 @@ install(
   DESTINATION share/${PROJECT_NAME}
 )
 
-# Install RViz configs
-install(
-  DIRECTORY rviz
-  DESTINATION share/${PROJECT_NAME}
-)
-
 ament_package()

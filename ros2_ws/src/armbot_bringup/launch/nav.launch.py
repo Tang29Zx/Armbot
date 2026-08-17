@@ -44,7 +44,7 @@ def generate_launch_description():
     lidar_port_arg = DeclareLaunchArgument(
         'lidar_port', default_value='/dev/ttyUSB0')
     lidar_baud_arg = DeclareLaunchArgument(
-        'lidar_baudrate', default_value='230400')
+        'lidar_baudrate', default_value='115200')
     use_rviz_arg = DeclareLaunchArgument(
         'use_rviz', default_value='true',
         description='Launch RViz2 for visualization')

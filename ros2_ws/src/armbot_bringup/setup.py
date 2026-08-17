@@ -29,6 +29,8 @@ setup(
     license='MIT',
     tests_require=['pytest'],
     entry_points={
-        'console_scripts': [],
+        'console_scripts': [
+            'costmap_bridge = armbot_bringup.costmap_bridge:main',
+        ],
     },
 )

@@ -41,7 +41,7 @@ def generate_launch_description():
         'lidar_port', default_value='/dev/ttyUSB0',
         description='LiDAR serial port')
     lidar_baud_arg = DeclareLaunchArgument(
-        'lidar_baudrate', default_value='230400',
+        'lidar_baudrate', default_value='115200',
         description='LiDAR baud rate')
     lidar_motor_arg = DeclareLaunchArgument(
         'lidar_motor_hz', default_value='8.0',

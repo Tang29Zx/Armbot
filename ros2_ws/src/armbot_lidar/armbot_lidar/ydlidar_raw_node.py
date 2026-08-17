@@ -37,7 +37,7 @@ class YDLidarRawNode(Node):
         super().__init__('ydlidar_raw_node')
 
         self.declare_parameter('port', '/dev/ttyUSB0')
-        self.declare_parameter('baudrate', 230400)
+        self.declare_parameter('baudrate', 115200)
         self.declare_parameter('frame_id', 'laser')
         self.declare_parameter('range_min', 0.05)
         self.declare_parameter('range_max', 12.0)
@@ -59,8 +59,12 @@ class YDLidarRawNode(Node):
         self.ser.reset_input_buffer()
 
         # ── Publisher ──────────────────────────────────────────────────
+        # Use default (RELIABLE) QoS so Nav2 costmap obstacle_layer
+        # (which subscribes with RELIABLE in Humble) can receive /scan.
+        # sensor_data QoS (BEST_EFFORT) is incompatible -> no obstacles
+        # in costmap -> DWB does not avoid obstacles.
         self.scan_pub = self.create_publisher(
-            LaserScan, '/scan', rclpy.qos.qos_profile_sensor_data
+            LaserScan, '/scan', 10
         )
 
         # ── State ─────────────────────────────────────────────────────
