@@ -19,8 +19,10 @@ PY
 sed "s/__PC_DDS_IP__/${PC_DDS_IP}/g" \
     /etc/armbot/fastdds.pc.xml.in > /tmp/armbot-fastdds.xml
 
+set +u
 source /opt/ros/humble/setup.bash
 source /opt/armbot_ws/install/setup.bash
+set -u
 
 export ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-29}"
 export ROS_LOCALHOST_ONLY=0
@@ -29,4 +31,3 @@ export RMW_FASTRTPS_USE_QOS_FROM_XML=1
 export FASTRTPS_DEFAULT_PROFILES_FILE=/tmp/armbot-fastdds.xml
 
 exec "$@"
-

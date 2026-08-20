@@ -131,3 +131,53 @@ def test_operator_disable_sends_stop(node):
 
     assert response.success
     assert node._command_pub.publish.call_args.args[0].mode == ArmCommand.MODE_STOP
+
+
+def _state_with_position_valid(node, valid):
+    state = _healthy_state()
+    state.position_valid = valid
+    node._on_state(state)
+
+
+def test_single_invalid_feedback_frame_does_not_disable(node):
+    _prepare_enable(node)
+    assert _set_enabled(node, True).success
+    node._command_pub.reset_mock()
+
+    _state_with_position_valid(node, False)
+
+    assert node._vla_enabled
+    node._command_pub.publish.assert_not_called()
+
+
+def test_invalid_feedback_streak_disables_and_sends_stop(node):
+    _prepare_enable(node)
+    assert _set_enabled(node, True).success
+    node._command_pub.reset_mock()
+
+    streak = int(node._cfg("feedback_invalid_streak"))
+    for _ in range(streak):
+        _state_with_position_valid(node, False)
+
+    node._watchdog_tick()
+
+    assert not node._vla_enabled
+    stop = node._command_pub.publish.call_args.args[0]
+    assert stop.mode == ArmCommand.MODE_STOP
+
+
+def test_recovery_resets_invalid_streak(node):
+    _prepare_enable(node)
+    assert _set_enabled(node, True).success
+    node._command_pub.reset_mock()
+
+    streak = int(node._cfg("feedback_invalid_streak"))
+    _state_with_position_valid(node, False)
+    _state_with_position_valid(node, True)
+    for _ in range(streak - 1):
+        _state_with_position_valid(node, False)
+
+    node._watchdog_tick()
+
+    assert node._vla_enabled
+    node._command_pub.publish.assert_not_called()

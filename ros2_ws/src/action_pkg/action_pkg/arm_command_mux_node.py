@@ -22,6 +22,7 @@ class ArmCommandMuxNode(Node):
         self._state_received_at = None
         self._heartbeat_received_at = None
         self._last_forwarded_sequence = 0
+        self._position_invalid_streak = 0
 
         self._command_pub = self.create_publisher(
             ArmCommand, self._cfg("output_topic"), 10
@@ -88,6 +89,7 @@ class ArmCommandMuxNode(Node):
             "enable_service": "/arm/set_vla_enabled",
             "heartbeat_timeout_sec": 0.30,
             "state_timeout_sec": 0.50,
+            "feedback_invalid_streak": 3,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -98,6 +100,10 @@ class ArmCommandMuxNode(Node):
     def _on_state(self, message):
         self._latest_state = message
         self._state_received_at = time.monotonic()
+        if message.position_valid:
+            self._position_invalid_streak = 0
+        else:
+            self._position_invalid_streak += 1
 
     def _on_heartbeat(self, _message):
         self._heartbeat_received_at = time.monotonic()
@@ -178,7 +184,12 @@ class ArmCommandMuxNode(Node):
         if state is None:
             return "ArmState missing"
         if not state.position_valid:
-            return "joint feedback became invalid"
+            streak = int(self._cfg("feedback_invalid_streak"))
+            if self._position_invalid_streak >= streak:
+                return (
+                    "joint feedback became invalid (%d consecutive invalid "
+                    "frames)" % self._position_invalid_streak
+                )
         if state.state in (ArmState.STATE_ERROR, ArmState.STATE_ESTOP):
             return "arm entered ERROR/ESTOP"
         if state.error_code != 0:

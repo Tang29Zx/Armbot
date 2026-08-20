@@ -3,7 +3,7 @@
 ## 项目概况
 
 - 项目名：Armbot
-- 最近更新：2026-08-07
+- 最近更新：2026-08-19
 - 技术栈：ROS 2 Humble、Python 3.10、I2C
 - 构建与依赖：colcon、ament、APT、pip
 - 主要目录：`ros2_ws/src`、`rdk_video_push`、`docs`、`.github/workflows`
@@ -47,6 +47,33 @@
 不需要清错或 Home。其他错误仍保持原安全恢复流程。
 
 ## 已验证记录
+
+- 2026-08-20：实机 VLA 闭环暴露出"瞬时单路 servo raw=0.0 导致 position_valid
+  单帧翻转"的偶发问题，以及 F/G 流结束命令 33s 无固件终态的问题。已做两处
+  软件缓解（不覆盖固件）：① mux 对 `position_valid=false` 改为连续 3 帧才
+  撤销（`feedback_invalid_streak=3`），单帧 100ms 毛刺不再打断 VLA，真持续
+  故障仍会 3 帧后 STOP；② controller 对 F/G 流结束命令超时不再锁
+  `ERR_CMD_TIMEOUT(0x0016)`，改为 WARN 并发布 `SUCCEEDED/COMPLETED` 让 bridge
+  scheduler 释放 pending 继续下一动作族，非流命令超时仍锁 0x0016。另在
+  controller `_update_joint_feedback` 后新增 `position_valid` 翻转诊断日志，
+  打印六路 servo raw 与 lifecycle/error/wire_id。实机证据：去抖修复后 VLA
+  从 wire_id=73 连续运行到 366（约 90 秒）未被瞬时毛刺打断，后因 F 超时
+  0x0016 停机；固件对 STOP 能正常回 COMPLETED，说明固件健康，F 收敛超时是
+  固件侧问题，根治需刷 MEMORY 记录中的续期 HEX（`32380e4d...`）待验证。
+  改动位于 `action_pkg/arm_command_mux_node.py`、`arm_controller_node.py`，
+  本地与 RDK 均已同步重建，controller+mux 回归 84 passed。桥容器 bridge 侧
+  无代码改动。重启控制栈后需重新 Home 再启用 VLA。
+
+- 2026-08-19：PC 与 RDK 的直连网线已配置为持久静态网段：PC
+  `enp130s0=192.168.50.1/24`、RDK `eth0=192.168.50.2/24`，两端均无网关且
+  `ipv4.never-default=yes`，不会抢占 Wi-Fi 默认路由。PC UFW 仅允许 RDK 有线地址在
+  `enp130s0` 入站 Domain 29 所需 UDP `14650:14899`。PC Docker bridge 的
+  `PC_DDS_IP` 已切到 `192.168.50.1`，RDK 与仓库 `config/fastdds.xml` 的 UDP
+  allowlist 已切到 `192.168.50.2`；板端旧配置备份为
+  `~/.local/state/armbot/config-backups/fastdds-20260819-before-wired-dds.xml`。
+  `ssh rdk` 也已改为有线地址。双向 ping、SSH、ROS 端点均已验证；`/vla/image`
+  约 10 Hz，结构化推理日志持续写入，最终状态为 `vla_enabled=false`、机械臂
+  `IDLE/error_code=0`。本次切网未启用 VLA、未发送运动命令，重新控制前仍须显式 Home。
 
 - 2026-08-07：已为 Arch/Ubuntu PC → Fast DDS Domain 29 → RDK 的 OpenPI 在线
   推理链新增 Docker 适配源码。GPU OpenPI server 与 ROS 2 Humble bridge 分容器；

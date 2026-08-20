@@ -102,6 +102,7 @@ HybrIK/
 #RDK video runtime artifacts
 #=========================
 /rdk_video_push/logs/
+/docker/vla-runtime/logs/
 *.pid
 *.h264
 

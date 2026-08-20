@@ -196,6 +196,7 @@ class ArmControllerNode(Node):
         self._error_code = 0
         self._error_message = ''
         self._position_valid = False
+        self._last_position_valid = False
         self._joint_position = [0.0] * 5
         self._servo_raw_positions = [0.0] * I2C_JOINT_COUNT  # servo raw (0..1000)
         self._gripper_position = 0.0
@@ -1143,6 +1144,21 @@ class ArmControllerNode(Node):
         self._clear_active_motion()
         self._stream_open = False
         self._stream_open_family = None
+        if self._is_stream_end(mode):
+            # F/G carry no wire duration and the firmware may not confirm the
+            # terminal state after a large deceleration window.  Treat the
+            # stream as ended instead of locking the control stack with
+            # ERR_CMD_TIMEOUT, so the VLA scheduler can release its pending
+            # stream-end and continue with the next action family.
+            self.get_logger().warn(
+                'stream end %s acknowledged but no terminal firmware '
+                'lifecycle within %.2fs (seq=%d, wire_id=%d); '
+                'treating stream as ended'
+                % (_motion_mode_tag(mode), timeout_sec, seq, wire_id))
+            self._set_state(
+                ArmState.STATE_SUCCEEDED, seq, ArmState.PHASE_COMPLETED)
+            self.publish_state()
+            return
         self._set_error(
             ERR_CMD_TIMEOUT,
             'no terminal firmware lifecycle within %.2fs '
@@ -1283,6 +1299,14 @@ class ArmControllerNode(Node):
         lifecycle, error, wire_id = decoded
         self._firmware_protocol_ok = True
         self._update_joint_feedback(data)
+        if self._position_valid != self._last_position_valid:
+            self.get_logger().warn(
+                '[joint feedback] position_valid %s -> %s (lifecycle=%d '
+                'error=%d wire_id=%d, servo_raw=[%s])'
+                % (self._last_position_valid, self._position_valid, lifecycle,
+                   error, wire_id,
+                   ', '.join('%.1f' % v for v in self._servo_raw_positions)))
+            self._last_position_valid = self._position_valid
         status_key = (lifecycle, error, wire_id)
         if status_key != self._last_logged_raw:
             self.get_logger().info(

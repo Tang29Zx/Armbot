@@ -22,6 +22,7 @@ from std_msgs.msg import Bool, Empty
 
 from .action_scheduler import ActionScheduler, SchedulerConfig
 from .image_tools import decode_resize_with_pad
+from .inference_logging import InferenceJsonlLogger
 from .policy_client import PolicyClient
 
 
@@ -83,6 +84,7 @@ class _PolicyWorker:
                         "observation_time": request["observation_time"],
                         "latency_sec": time.monotonic() - started,
                         "error": None,
+                        "log_context": request["log_context"],
                     }
                 )
             except Exception as exc:
@@ -92,6 +94,7 @@ class _PolicyWorker:
                         "observation_time": request["observation_time"],
                         "latency_sec": time.monotonic() - started,
                         "error": str(exc),
+                        "log_context": request["log_context"],
                     }
                 )
 
@@ -109,6 +112,14 @@ class VlaBridgeNode(Node):
         self._shadow = bool(self._cfg("shadow_mode"))
         self._prompt = str(self._cfg("prompt"))
         self._max_actions = int(self._cfg("max_actions_per_chunk"))
+        self._inference_log = None
+        self._inference_log_error_reported = False
+        if bool(self._cfg("inference_logging_enabled")):
+            self._inference_log = InferenceJsonlLogger(
+                str(self._cfg("inference_log_path")),
+                int(self._cfg("inference_log_max_bytes")),
+                int(self._cfg("inference_log_backup_count")),
+            )
         self._latest_jpeg = None
         self._image_received_at = None
         self._latest_state = None
@@ -199,6 +210,19 @@ class VlaBridgeNode(Node):
             "VLA bridge started in %s mode; policy=%s"
             % ("SHADOW" if self._shadow else "COMMAND", client.uri)
         )
+        if self._inference_log is not None:
+            self._write_inference_log(
+                {
+                    "event": "session_start",
+                    "mode": self._mode_name(),
+                    "prompt": self._prompt,
+                    "max_actions_per_chunk": self._max_actions,
+                }
+            )
+            self.get_logger().info(
+                "inference JSONL logging enabled at %s"
+                % self._inference_log.path
+            )
 
     def _declare_parameters(self):
         defaults = {
@@ -206,6 +230,10 @@ class VlaBridgeNode(Node):
             "policy_port": 8000,
             "prompt": "抓取药盒",
             "shadow_mode": True,
+            "inference_logging_enabled": False,
+            "inference_log_path": "/var/log/armbot/inference.jsonl",
+            "inference_log_max_bytes": 52428800,
+            "inference_log_backup_count": 5,
             "image_topic": "/vla/image",
             "state_topic": "/arm/state_filtered",
             "raw_state_topic": "/arm/state",
@@ -355,6 +383,16 @@ class VlaBridgeNode(Node):
                 "observation_time": min(
                     self._image_received_at, self._state_received_at
                 ),
+                "log_context": {
+                    "submitted_at_unix_ns": time.time_ns(),
+                    "image_bytes": len(self._latest_jpeg),
+                    "observation_state": observation_state.tolist(),
+                    "arm_state": int(state.state),
+                    "command_phase": int(state.command_phase),
+                    "sequence_id": int(state.sequence_id),
+                    "position_valid": bool(state.position_valid),
+                    "error_code": int(state.error_code),
+                },
             }
         )
         if submitted:
@@ -370,6 +408,7 @@ class VlaBridgeNode(Node):
         if result is None:
             return
         self._request_outstanding = False
+        self._write_inference_result(result)
         if result["error"] is not None:
             self._queued_actions.clear()
             self._staged_actions = None
@@ -398,6 +437,58 @@ class VlaBridgeNode(Node):
             self._queued_actions = staged
         else:
             self._staged_actions = staged
+
+    def _mode_name(self):
+        return "shadow" if self._shadow else "command"
+
+    def _write_inference_result(self, result):
+        if self._inference_log is None:
+            return
+        context = result["log_context"]
+        record = {
+            "event": (
+                "inference_error"
+                if result["error"] is not None
+                else "inference_result"
+            ),
+            "mode": self._mode_name(),
+            "vla_enabled": bool(self._vla_enabled),
+            "prompt": self._prompt,
+            "latency_ms": float(result["latency_sec"] * 1000.0),
+            "observation_age_ms": float(
+                (time.monotonic() - result["observation_time"]) * 1000.0
+            ),
+            **context,
+        }
+        if result["error"] is not None:
+            record["error"] = result["error"]
+        else:
+            actions = result["actions"]
+            record.update(
+                {
+                    "action_shape": list(actions.shape),
+                    "selected_action_count": min(
+                        self._max_actions, int(actions.shape[0])
+                    ),
+                    "action_abs_max": np.max(np.abs(actions), axis=0).tolist(),
+                    "action_mean_abs": np.mean(np.abs(actions), axis=0).tolist(),
+                    "actions": actions.tolist(),
+                }
+            )
+        self._write_inference_log(record)
+
+    def _write_inference_log(self, record):
+        if self._inference_log is None:
+            return
+        try:
+            self._inference_log.write(record)
+        except (OSError, TypeError, ValueError) as exc:
+            # Audit logging must never destabilize the safety/control loop.
+            if not self._inference_log_error_reported:
+                self.get_logger().error(
+                    "inference JSONL write failed; control continues: %s" % exc
+                )
+                self._inference_log_error_reported = True
 
     def _control_tick(self):
         self._drain_policy_result()
@@ -526,6 +617,11 @@ class VlaBridgeNode(Node):
 
     def destroy_node(self):
         self._worker.close()
+        if self._inference_log is not None:
+            self._write_inference_log(
+                {"event": "session_end", "mode": self._mode_name()}
+            )
+            self._inference_log.close()
         super().destroy_node()
 
 

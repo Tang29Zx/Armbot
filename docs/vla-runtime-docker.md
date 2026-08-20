@@ -137,6 +137,19 @@ VLA_SHADOW=true
 shadow inference ... ms first_action=[...]
 ```
 
+结构化推理日志可独立于 Shadow/实机模式开关。在 `.env` 中设置：
+
+```dotenv
+VLA_INFERENCE_LOGGING=true
+VLA_INFERENCE_LOG_DIR=/home/user/Armbot/docker/vla-runtime/logs
+```
+
+启用后，Shadow 和实机模式都会把每次推理的完整 action chunk、观测状态、延迟、
+观测年龄和各动作维度统计写入宿主机 `inference.jsonl`。每个文件最大 50 MiB，保留
+5 个轮转备份。设为 `VLA_INFERENCE_LOGGING=false` 时完全停止写入。每条记录的
+`mode` 字段为 `shadow` 或 `command`，实机记录还通过 `vla_enabled` 标识 mux 是否
+已授予 VLA 控制权。
+
 至少确认：
 
 1. RDK 可见且仅有一个 `/arm/state` publisher；

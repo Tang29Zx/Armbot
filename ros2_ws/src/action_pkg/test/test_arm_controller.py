@@ -1282,6 +1282,30 @@ def test_stream_end_uses_full_motion_window_before_terminal_timeout(node):
 
     time.sleep(0.20)
     node.poll_status()
+    # F/G stream-end without a terminal firmware lifecycle is treated as
+    # completed so the VLA scheduler can release its pending and continue.
+    assert node._state == ArmState.STATE_SUCCEEDED
+    assert node._command_phase == ArmState.PHASE_COMPLETED
+    assert node._error_code == 0
+    assert node._active_wire_id == 0
+
+
+def test_non_stream_command_timeout_still_locks_error(node):
+    import time
+    node.set_parameters(
+        [Parameter('command_timeout_sec', Parameter.Type.DOUBLE, 0.05)])
+    node.handle_command(_cmd(
+        ArmCommand.MODE_GRIPPER, seq=1,
+        gripper_position=1.0, duration_sec=0.05))
+    active_wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_ACCEPTED, active_wire_id)
+    node.poll_status()
+
+    time.sleep(0.15)
+    node._i2c_read_status = lambda: None
+    node.poll_status()
+
     assert node._state == ArmState.STATE_ERROR
     assert node._error_code == ERR_CMD_TIMEOUT
     assert node._active_wire_id == 0
