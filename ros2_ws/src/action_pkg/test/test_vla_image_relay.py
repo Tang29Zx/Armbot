@@ -1,7 +1,7 @@
 """Tests for the latest-frame VLA image relay."""
 
-from unittest.mock import MagicMock
 import time
+from unittest.mock import MagicMock
 
 from action_pkg.vla_image_relay_node import VlaImageRelayNode
 import pytest

@@ -2,8 +2,6 @@
 
 import math
 
-import pytest
-
 from action_pkg.teleop_mapping import (
     apply_deadzone,
     controls_neutral,
@@ -17,6 +15,7 @@ from action_pkg.teleop_mapping import (
     trigger_pressed,
     valid_joy,
 )
+import pytest
 
 
 BOUNDS = {

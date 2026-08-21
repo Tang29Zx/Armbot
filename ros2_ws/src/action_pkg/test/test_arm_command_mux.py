@@ -1,8 +1,8 @@
 """Safety and source-selection tests for the RDK command mux."""
 
+import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
-import time
 
 from action_interfaces.msg import ArmCommand, ArmState
 from action_pkg.arm_command_mux_node import ArmCommandMuxNode

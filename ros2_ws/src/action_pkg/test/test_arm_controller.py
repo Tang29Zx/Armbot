@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from action_interfaces.msg import ArmCommand, ArmState
+import action_pkg.arm_controller_node as controller_module
 from action_pkg.arm_controller_node import (
     ArmControllerNode,
     ERR_CMD_TIMEOUT,
@@ -31,22 +32,22 @@ from action_pkg.arm_controller_node import (
     ERR_FW_PROTOCOL,
     ERR_FW_RESTARTED,
     ERR_FW_SERVO_DEADLINE,
+    ERR_FW_SERVO_FEEDBACK,
     ERR_FW_STREAM_STEP_TOO_LARGE,
     ERR_FW_STREAM_TIMEOUT,
-    ERR_GRIPPER_STOP_WRITE,
-    ERR_FW_SERVO_FEEDBACK,
     ERR_GRIPPER_RANGE,
+    ERR_GRIPPER_STOP_WRITE,
     ERR_GRIPPER_UNMAPPED,
     ERR_I2C_LOST,
     ERR_JOINT_DISABLED,
     ERR_NONFINITE_FIELD,
     ERR_STALE_CMD,
     ERR_WRIST_ROLL_RANGE,
-    FW_ERROR_MOTION_TIMEOUT,
     FW_ERROR_ARM_NOT_READY,
+    FW_ERROR_MOTION_TIMEOUT,
     FW_ERROR_NO_IK_SOLUTION,
-    FW_ERROR_SERVO_FEEDBACK_FAILED,
     FW_ERROR_SERVO_DEADLINE_MISSED,
+    FW_ERROR_SERVO_FEEDBACK_FAILED,
     FW_ERROR_STREAM_STEP_TOO_LARGE,
     FW_ERROR_STREAM_TIMEOUT,
     FW_LIFECYCLE_ACCEPTED,
@@ -61,7 +62,6 @@ from action_pkg.arm_controller_node import (
     I2C_READ_ATTEMPTS,
     I2C_READ_RETRY_DELAY_SEC,
 )
-import action_pkg.arm_controller_node as controller_module
 import pytest
 import rclpy
 from rclpy.parameter import Parameter
@@ -326,8 +326,13 @@ def test_cartesian_stream_waits_for_executing_and_uses_v3_tag(node):
 def test_latest_stream_target_is_sent_before_pending_end(node):
     writes = []
     node._i2c_write = lambda data: writes.append(bytes(data)) or True
-    base = dict(x=15.0, y=0.1, z=2.0, pitch=-54.48,
-                duration_sec=0.2)
+    base = {
+        'x': 15.0,
+        'y': 0.1,
+        'z': 2.0,
+        'pitch': -54.48,
+        'duration_sec': 0.2,
+    }
     node.handle_command(_cmd(
         ArmCommand.MODE_CARTESIAN_SERVO, seq=1, **base))
     first_wire = node._active_wire_id

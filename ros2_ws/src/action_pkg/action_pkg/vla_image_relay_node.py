@@ -9,6 +9,7 @@ from sensor_msgs.msg import CompressedImage
 
 
 class VlaImageRelayNode(Node):
+
     def __init__(self):
         super().__init__("vla_image_relay_node")
         self.declare_parameter("input_topic", "/image")

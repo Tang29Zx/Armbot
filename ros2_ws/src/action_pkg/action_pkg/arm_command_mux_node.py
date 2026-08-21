@@ -18,6 +18,7 @@ _RECOVERABLE_ERROR_CODES = frozenset((0x20, 0x21, 0x26))
 
 
 class ArmCommandMuxNode(Node):
+
     def __init__(self, **kwargs):
         super().__init__("arm_command_mux_node", **kwargs)
         self._declare_parameters()
