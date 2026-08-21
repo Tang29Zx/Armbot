@@ -1,0 +1,16 @@
+# Gripper control with optional force-feedback threshold.
+#
+# Request:  target position + force threshold
+# Response: actual state + force feedback
+
+float32 position               # Target gripper opening [0.0, 1.0] (0=closed, 1=open)
+float32 max_effort             # Max grip force [0.0, 1.0]; 0 = position-only control
+float32 force_threshold        # Force threshold for grasp-detection; 0 = disabled
+float32 duration_sec           # Max seconds to wait for force trigger
+---
+bool success                   # True if gripper reached commanded position
+
+float32 actual_position        # Achieved gripper position
+bool force_triggered           # True if force exceeded threshold (grasp verified)
+float32 force_reading          # Final force reading
+string message                 # Human-readable status
