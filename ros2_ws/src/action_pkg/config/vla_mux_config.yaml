@@ -11,4 +11,5 @@ arm_command_mux_node:
     enable_service: /arm/set_vla_enabled
     heartbeat_timeout_sec: 0.30
     state_timeout_sec: 0.50
+    feedback_invalid_streak: 5
 

@@ -3,7 +3,7 @@
 ## 项目概况
 
 - 项目名：Armbot
-- 最近更新：2026-08-19
+- 最近更新：2026-08-21
 - 技术栈：ROS 2 Humble、Python 3.10、I2C
 - 构建与依赖：colcon、ament、APT、pip
 - 主要目录：`ros2_ws/src`、`rdk_video_push`、`docs`、`.github/workflows`
@@ -47,6 +47,113 @@
 不需要清错或 Home。其他错误仍保持原安全恢复流程。
 
 ## 已验证记录
+
+- 2026-08-21：夹爪“动一下即 `0x0022` 停机”已结合对应 STM32 v3 源码纠正
+  根因。WSL 的 `LeArm-v3-direct-servo.hex` SHA-256 精确匹配交接记录
+  `32380e4d...`；固件 `direct_servo_submit()` 允许相同绝对目标 `U`，失败并非
+  重复目标非法。RDK 日志显示 `seq=266 EXECUTING` 到 `seq=267 BAD_COMMAND`
+  仅约 `299.6 ms`：bridge 等到已延迟约 120 ms 的 matching `EXECUTING` 后又等待
+  150 ms，并受 10 Hz tick 量化，第二条 `U` 恰好落在 300 ms watchdog 边界；固件
+  主循环先进入 `stopping`，随后 `U` 因 `stopping != NONE` 被外层映射为
+  `BAD_COMMAND`。bridge 已改为事务创建后首个 keepalive 立即到期，后续间隔门限
+  `50 ms`（10 Hz 下实际约每 100 ms），到位/接触仍发送 `H`，且不把 `0x0022`
+  降级为可恢复错误。新增首 tick 续传回归，打包镜像内完整测试 `29 passed`；镜像
+  `sha256:56f76cec463b...` 已用 `--no-deps` 单独部署。部署前显式关闭 VLA，部署后
+  RDK 为 `IDLE/position_valid=true/error_code=0/seq=587`，未发送实机动作。
+
+- 2026-08-21：实机审计确认“夹好后不上抬”的直接时序：本轮共发布 504 条命令，
+  其中 361 条 Cartesian `T`（76 条同目标 keepalive）和 14 条 `F`；前 13 条 `F`
+  正常结束，最后 `F seq=508` 在 `EXECUTING` 停留完整 33 秒后明确报
+  `ERR_CMD_TIMEOUT(0x0016)`。触发前夹爪逻辑 target 已提交为约 `0.965`，实际反馈
+  稳定在约 `0.816`；旧 bridge 仅在短暂的 `active_family=gripper` 且无 pending 时
+  检测接触，`U seq=497` ACK 后约 12.8 ms 即因下一 policy action 发送 `H seq=498`，
+  不可能收齐 3 个稳定反馈样本，因此接触锁存失效，后续继续闭合的模型输出又触发
+  Cartesian→gripper 的 `F`。已改为独立、反馈驱动的夹爪事务：每个已安装 `U`
+  目标在反馈解决前阻塞后续动作，按 150 ms 间隔发送同目标 `U keepalive`；到达目标
+  或“先有有效进展、再稳定且仍有目标差”时发送有界 `H` 并把 scheduler target 回写
+  为实际反馈，接触时锁存并抑制后续继续闭合输出；600 ms 完全无进展或 1.5 s 事务
+  未完成则发送 `H`、记录 `no_progress_fault` 并停止 heartbeat，不能把舵机故障误当
+  接触。新增确定性 `gripper_guard.py`，审计新增 `gripper_transaction_started`、真实
+  `target_clamped`、`no_progress_fault`。打包后 `vla_runtime` pytest/colcon 均为
+  28 tests、0 failures/errors；bridge 镜像 `sha256:afad43e7ebe4...` 已用 `--no-deps`
+  单独部署，OpenPI 保持已预热，推理约 230–236 ms、容器 heartbeat 约 20 Hz，RDK
+  mux 已发现订阅。部署前后均显式保持 `vla_enabled=false`，控制栈未重启、未发送
+  VLA 动作。RDK 时钟已从 PC 手动校准为 Asia/Shanghai 当前时间并写入 RTC；板端仍
+  无 NTP 服务，长时间运行可能有漂移。
+
+- 2026-08-21：针对上一轮 VLA 中 15 次笛卡尔 `F` 各阻塞 33 秒、随后共出现
+  37 次 `ARM_NOT_READY` 的证据，已先完成主机侧收敛修复。bridge scheduler 在
+  已打开 Cartesian 流且策略 action 低于 deadband 时，改为发送相同已确认绝对
+  target 的 `T keepalive`；它刷新 300 ms watchdog、经匹配 `EXECUTING` 后消费
+  no-op action，但不累计 XYZ。只有明确切换夹爪/腕转时仍发送 `F`。controller
+  保留 F/G 的 `max_duration_sec + command_timeout_sec=33 s` 完整终态窗口，超时后
+  不再伪造 `SUCCEEDED/COMPLETED`，恢复为锁存 `ERR_CMD_TIMEOUT`。结构化
+  `inference.jsonl` 新增 `command_published`、`lifecycle_observed`、
+  `target_committed`、`target_rejected`、`recoverable_error`，可直接审计实际发布的
+  mode/action/绝对 target 与 ACK；本轮未实现 XYZ clamp 或 no-progress guard，
+  因而不伪造 `target_clamped/no_progress_fault` 事件。PC 新 bridge 镜像
+  `sha256:143521c48af4...` 已重建并重启，完整 `vla_runtime` 回归 19 passed；RDK
+  controller/test 已备份到
+  `~/.local/state/armbot/deploy-backups/20260821-vla-keepalive-audit-pre` 后同步重建，
+  controller+mux 回归 89 tests、0 failures/errors，源码/build symlink 哈希一致。
+  部署期间 RDK 控制栈始终为空，未 Home、未启用 VLA、未发送 I2C 运动命令；实机
+  `T keepalive` 与真实动作族切换仍待后续显式 Home 后验收。RDK 本次开机时间仍为
+  `2000-01-01`，实机日志联调前必须先恢复正确时钟。
+
+- 2026-08-20：四层 recoverable 修复后的最新实机复测：VLA 从 wire=462 连续
+  运行到 491+（约 100 秒）未被中断，`F` 流结束命令两次 33s 无终态都被宽容
+  处理（`stream end F ... treating stream as ended`）并继续发命令，mux 不再
+  撤销。**新现象/未解决**：机械臂"成功退出但不上抬"——bridge 持续下发 z
+  正增量（216/222 帧 dz>0，幅度 0.05~0.26 cm）、夹爪保持闭合，固件持续 ACK
+  （lifecycle=2/error=0/wire 递增），但机械臂关节反馈纹丝不动
+  （j2=0.297/j3=-0.855/j4=-0.431 恒定），疑似 scheduler 按 ACK 累加
+  target.z（home z=2.0cm 已累加大幅正向）与固件实际 IK 执行不一致：目标 z
+  可能已超出固件 IK 可达域但固件只 ACK 不报 NO_IK，或 z 命令未被真实执行。
+  这是与"夹爪 raw 287 后不动"同类的"固件 ACK 但物理未到位"问题。下一步：
+  先确认当前机械臂实际 z 高度 vs scheduler 累计 target.z，再决定是固件 IK
+  上限问题还是动作映射问题。控制栈本次 PID 47384。遗留未做：固件续期 HEX
+  `32380e4d...` 未刷写；RDK 控制栈与 bridge 均需重启加载最新代码后复测。
+
+- 2026-08-20：承接上条三层修复后复测，`ARM_NOT_READY` 瞬态（wire=455
+  error=3，456 即恢复）虽已被 controller 按 recoverable 处理（WARN+error=
+  0x21），bridge 仍报 `VLA command execution disabled`、mux 报
+  `VLA heartbeat timeout` 撤销。根因：bridge `_control_healthy()` 与
+  `_observation_fresh()` 独立于 scheduler 之外，对 `raw.error_code != 0`
+  直接扣留心跳，未被 recoverable 逻辑覆盖。已给两处都加
+  `RECOVERABLE_ERROR_CODES={0x20,0x21,0x26}` 豁免（从 action_scheduler
+  导入），心跳在瞬态可恢复错误下继续发布。容器镜像重建，scheduler/
+  policy_client/inference_logging 回归 14 passed，bridge 容器已重启。
+  至此 controller/mux/scheduler/bridge 心跳四层对可恢复错误码行为一致：
+  丢目标继续不停止。固件根治（续期 HEX `32380e4d...`）仍未做。
+
+- 2026-08-20：实机复测中 VLA 运行约 60 秒后固件对 wire_id=294 主动报
+  `ARM_NOT_READY`（error=3，下一帧 295 即恢复正常），controller 原把它当
+  不可恢复错误锁 `0x0021`，mux 撤销 VLA。排查发现 controller 的 recoverable
+  机制此前对 VLA 链路实际无效：bridge scheduler `observe_lifecycle` 只认
+  `error_code!=0 或 phase==FAILED` 即 `failed=True` 锁存，导致之前的
+  `NO_IK(0x20)/STREAM_STEP_TOO_LARGE(0x26)` 可恢复在 VLA 下同样会停心跳。
+  已做三层修复：① controller 把 `ARM_NOT_READY` 对流目标加入 recoverable
+  （WARN+IDLE/PHASE_FAILED，非流命令仍锁错）；② bridge scheduler 新增
+  `RECOVERABLE_ERROR_CODES={0x20,0x21,0x26}`，可恢复错误清 pending 回退
+  target 但不返回 failed（心跳继续）；③ mux `_runtime_health_reason` 与
+  `_enable_reasons` 对可恢复错误码不再撤销/拒绝。RDK controller+mux 回归
+  89 passed，bridge 容器 scheduler 8 passed，bridge 镜像已重建重启，RDK
+  控制栈需重启加载新 controller/mux。固件根治（续期 HEX `32380e4d...`）
+  仍未做，超长毛刺/真持续故障仍会兜底 STOP。
+
+- 2026-08-20：实机复测确认瞬时 servo raw=0.0 毛刺可连续 2~3 帧且随机出现在
+  单路（servo1/2/4/5/6 均出现过），固件 error=0、对 STOP 正常 COMPLETED，
+  属 STM32/USART2 反馈链路间歇性损坏帧，与历史 `SERVO_FEEDBACK_FAILED`
+  同源（那次六路全 0）。据此把前条 3 帧去抖升级为两层缓解：① controller
+  `_update_joint_feedback` 容忍"6 路中仅 1 路瞬时无效"——用最近全有效快照
+  `_servo_raw_hold` 替代该路并保持 `position_valid=true`，≥2 路同时无效仍
+  判 false（不掩盖真实故障），且始终更新 raw 保持固件 `SERVO_FEEDBACK_FAILED`
+  诊断准确；② mux `feedback_invalid_streak` 3→5（约 500ms 兜底多路偶发）。
+  controller+mux 回归 86 passed，本地与 RDK 同步重建。注意：实机也观测到
+  夹爪闭合流曾被固件以 `0x0026 STREAM_STEP_TOO_LARGE` 拒绝（wire 359，
+  scheduler 按 ACK 累加 target 超前于固件实际位置导致单步超 12 度），以及
+  `mode=P` 夹爪命令 4s 无终态报 0x0016，这些固件侧收敛/执行问题仍待刷
+  续期 HEX（`32380e4d...`）根治，软件仅在 bridge 侧半量程等安全默认下运行。
 
 - 2026-08-20：实机 VLA 闭环暴露出"瞬时单路 servo raw=0.0 导致 position_valid
   单帧翻转"的偶发问题，以及 F/G 流结束命令 33s 无固件终态的问题。已做两处

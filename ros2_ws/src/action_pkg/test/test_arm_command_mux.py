@@ -139,6 +139,12 @@ def _state_with_position_valid(node, valid):
     node._on_state(state)
 
 
+def _state_with_error_code(node, error_code):
+    state = _healthy_state()
+    state.error_code = error_code
+    node._on_state(state)
+
+
 def test_single_invalid_feedback_frame_does_not_disable(node):
     _prepare_enable(node)
     assert _set_enabled(node, True).success
@@ -158,6 +164,33 @@ def test_invalid_feedback_streak_disables_and_sends_stop(node):
     streak = int(node._cfg("feedback_invalid_streak"))
     for _ in range(streak):
         _state_with_position_valid(node, False)
+
+    node._watchdog_tick()
+
+    assert not node._vla_enabled
+    stop = node._command_pub.publish.call_args.args[0]
+    assert stop.mode == ArmCommand.MODE_STOP
+
+
+def test_recoverable_error_code_does_not_disable(node):
+    _prepare_enable(node)
+    assert _set_enabled(node, True).success
+    node._command_pub.reset_mock()
+
+    _state_with_error_code(node, 0x21)
+
+    node._watchdog_tick()
+
+    assert node._vla_enabled
+    node._command_pub.publish.assert_not_called()
+
+
+def test_non_recoverable_error_code_disables(node):
+    _prepare_enable(node)
+    assert _set_enabled(node, True).success
+    node._command_pub.reset_mock()
+
+    _state_with_error_code(node, 0x42)
 
     node._watchdog_tick()
 

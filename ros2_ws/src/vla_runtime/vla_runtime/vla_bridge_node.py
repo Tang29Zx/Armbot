@@ -20,7 +20,18 @@ from rclpy.qos import (
 from sensor_msgs.msg import CompressedImage
 from std_msgs.msg import Bool, Empty
 
-from .action_scheduler import ActionScheduler, SchedulerConfig
+from .action_scheduler import (
+    RECOVERABLE_ERROR_CODES,
+    ActionScheduler,
+    SchedulerConfig,
+)
+from .gripper_guard import (
+    EVENT_CONTACT,
+    EVENT_NO_PROGRESS,
+    EVENT_TIMEOUT,
+    GripperGuardConfig,
+    GripperTransaction,
+)
 from .image_tools import decode_resize_with_pad
 from .inference_logging import InferenceJsonlLogger
 from .policy_client import PolicyClient
@@ -114,6 +125,9 @@ class VlaBridgeNode(Node):
         self._max_actions = int(self._cfg("max_actions_per_chunk"))
         self._inference_log = None
         self._inference_log_error_reported = False
+        self._last_lifecycle_audit_key = None
+        self._recoverable_error_streak = 0
+        self._published_command_audit = {}
         if bool(self._cfg("inference_logging_enabled")):
             self._inference_log = InferenceJsonlLogger(
                 str(self._cfg("inference_log_path")),
@@ -135,10 +149,7 @@ class VlaBridgeNode(Node):
         self._queued_actions = deque()
         self._staged_actions = None
         self._gripper_contact_latched = False
-        self._gripper_close_origin = None
-        self._gripper_last_feedback = None
-        self._gripper_close_progress = False
-        self._gripper_contact_samples = 0
+        self._gripper_transaction = None
 
         scheduler_config = SchedulerConfig(
             action_scale=float(self._cfg("action_scale")),
@@ -153,6 +164,26 @@ class VlaBridgeNode(Node):
             stream_watchdog_sec=float(self._cfg("stream_watchdog_sec")),
         )
         self._scheduler = ActionScheduler(scheduler_config)
+        self._gripper_guard_config = GripperGuardConfig(
+            target_tolerance=float(self._cfg("gripper_target_tolerance")),
+            min_progress=float(self._cfg("gripper_contact_min_progress")),
+            stable_delta=float(self._cfg("gripper_contact_stable_delta")),
+            contact_stable_sec=float(
+                self._cfg("gripper_contact_stable_sec")
+            ),
+            keepalive_interval_sec=float(
+                self._cfg("gripper_keepalive_interval_sec")
+            ),
+            no_progress_timeout_sec=float(
+                self._cfg("gripper_no_progress_timeout_sec")
+            ),
+            transaction_timeout_sec=float(
+                self._cfg("gripper_transaction_timeout_sec")
+            ),
+        )
+        self._gripper_guard_config.validate(
+            float(self._cfg("stream_watchdog_sec"))
+        )
 
         self._command_pub = self.create_publisher(
             ArmCommand, str(self._cfg("command_topic")), 10
@@ -254,9 +285,12 @@ class VlaBridgeNode(Node):
             "gripper_deadband": 0.02,
             "gripper_max_step": 0.075,
             "gripper_contact_min_progress": 0.02,
-            "gripper_contact_min_gap": 0.04,
             "gripper_contact_stable_delta": 0.006,
-            "gripper_contact_stable_samples": 3,
+            "gripper_contact_stable_sec": 2.0,
+            "gripper_target_tolerance": 0.03,
+            "gripper_keepalive_interval_sec": 0.05,
+            "gripper_no_progress_timeout_sec": 0.6,
+            "gripper_transaction_timeout_sec": 1.5,
             "home_target": [15.0, 0.0, 2.0, -54.48],
             "pitch_limits_deg": [-90.0, 90.0],
             "wrist_roll_limits_rad": [-1.5707963268, 1.5707963268],
@@ -278,12 +312,15 @@ class VlaBridgeNode(Node):
     def _on_raw_state(self, message):
         self._latest_raw_state = message
         self._raw_state_received_at = time.monotonic()
+        pending = self._scheduler.pending
+        target_before = self._scheduler.target
         result = self._scheduler.observe_lifecycle(
             message.sequence_id,
             message.command_phase,
             message.state,
             message.error_code,
         )
+        self._audit_lifecycle(message, result, pending, target_before)
         if result.failed:
             self._control_fault_latched = True
             self._queued_actions.clear()
@@ -294,7 +331,12 @@ class VlaBridgeNode(Node):
             )
         elif result.consume_action and self._queued_actions:
             self._queued_actions.popleft()
-        self._observe_gripper_contact(message)
+        if pending is not None and pending.family == "gripper":
+            if result.rejected:
+                self._gripper_transaction = None
+            elif result.committed:
+                self._begin_gripper_transaction(message, pending)
+        self._observe_gripper_transaction(message)
 
     def _on_vla_enabled(self, message):
         enabled = bool(message.data) and not self._shadow
@@ -303,6 +345,9 @@ class VlaBridgeNode(Node):
         self._vla_enabled = enabled
         self._queued_actions.clear()
         self._staged_actions = None
+        self._published_command_audit.clear()
+        self._last_lifecycle_audit_key = None
+        self._recoverable_error_streak = 0
         self._reset_gripper_contact(clear_latch=True)
         if not enabled:
             self._scheduler.cancel()
@@ -339,7 +384,8 @@ class VlaBridgeNode(Node):
         return (
             state.position_valid
             and state.state not in (ArmState.STATE_ERROR, ArmState.STATE_ESTOP)
-            and state.error_code == 0
+            and (state.error_code == 0
+                 or state.error_code in RECOVERABLE_ERROR_CODES)
         )
 
     def _control_healthy(self, now):
@@ -357,7 +403,8 @@ class VlaBridgeNode(Node):
         if (
             not raw.position_valid
             or raw.state in (ArmState.STATE_ERROR, ArmState.STATE_ESTOP)
-            or raw.error_code != 0
+            or (raw.error_code != 0
+                and raw.error_code not in RECOVERABLE_ERROR_CODES)
         ):
             return False
         if self._last_policy_success is None:
@@ -433,7 +480,10 @@ class VlaBridgeNode(Node):
                 self._last_shadow_log = now
             return
         staged = deque(action.copy() for action in actions)
-        if self._scheduler.pending is None:
+        if (
+            self._scheduler.pending is None
+            and self._gripper_transaction is None
+        ):
             self._queued_actions = staged
         else:
             self._staged_actions = staged
@@ -490,24 +540,177 @@ class VlaBridgeNode(Node):
                 )
                 self._inference_log_error_reported = True
 
+    @staticmethod
+    def _target_audit_record(target):
+        if target is None:
+            return None
+        return {
+            "x": float(target.x),
+            "y": float(target.y),
+            "z": float(target.z),
+            "pitch": float(target.pitch),
+            "wrist_roll": float(target.wrist_roll),
+            "gripper": float(target.gripper),
+        }
+
+    @staticmethod
+    def _action_audit_record(action):
+        if action is None:
+            return None
+        return np.asarray(action, dtype=np.float64).reshape(-1)[:6].tolist()
+
+    def _publish_command(
+        self,
+        spec,
+        *,
+        source,
+        target_before,
+        active_family_before,
+        policy_action=None,
+        effective_action=None,
+    ):
+        self._command_pub.publish(self._make_command(spec))
+        audit = {
+            "command_mode": int(spec.mode),
+            "source": str(source),
+            "keepalive": bool(spec.keepalive),
+        }
+        self._published_command_audit[int(spec.sequence_id)] = audit
+        self._write_inference_log(
+            {
+                "event": "command_published",
+                "mode": self._mode_name(),
+                "sequence_id": int(spec.sequence_id),
+                "command_mode": int(spec.mode),
+                "source": str(source),
+                "keepalive": bool(spec.keepalive),
+                "duration_sec": float(spec.duration_sec),
+                "active_family_before": active_family_before,
+                "policy_action": self._action_audit_record(policy_action),
+                "effective_action": self._action_audit_record(
+                    effective_action
+                ),
+                "target_before": self._target_audit_record(target_before),
+                "target_candidate": self._target_audit_record(spec.target),
+            }
+        )
+
+    def _audit_lifecycle(self, message, result, pending, target_before):
+        if not self._vla_enabled and not result.matched:
+            return
+        pending_sequence = (
+            int(pending.sequence_id) if pending is not None else None
+        )
+        command_audit = self._published_command_audit.get(
+            int(message.sequence_id), {}
+        )
+        audit_key = (
+            int(message.sequence_id),
+            int(message.command_phase),
+            int(message.state),
+            int(message.error_code),
+            pending_sequence,
+        )
+        if audit_key != self._last_lifecycle_audit_key:
+            self._last_lifecycle_audit_key = audit_key
+            self._write_inference_log(
+                {
+                    "event": "lifecycle_observed",
+                    "mode": self._mode_name(),
+                    "sequence_id": int(message.sequence_id),
+                    "command_mode": command_audit.get("command_mode"),
+                    "command_phase": int(message.command_phase),
+                    "arm_state": int(message.state),
+                    "error_code": int(message.error_code),
+                    "matched_pending": bool(result.matched),
+                    "pending_sequence_id": pending_sequence,
+                }
+            )
+
+        if not result.matched or pending is None:
+            return
+
+        event_common = {
+            "mode": self._mode_name(),
+            "sequence_id": int(message.sequence_id),
+            "command_mode": command_audit.get("command_mode"),
+            "source": command_audit.get("source"),
+            "keepalive": bool(pending.keepalive),
+            "error_code": int(message.error_code),
+        }
+        if result.rejected:
+            self._write_inference_log(
+                {
+                    "event": "target_rejected",
+                    **event_common,
+                    "recoverable": bool(result.recoverable),
+                    "target_candidate": self._target_audit_record(
+                        pending.target
+                    ),
+                    "target_retained": self._target_audit_record(
+                        self._scheduler.target
+                    ),
+                }
+            )
+            if result.recoverable:
+                self._recoverable_error_streak += 1
+                self._write_inference_log(
+                    {
+                        "event": "recoverable_error",
+                        **event_common,
+                        "consecutive_count": self._recoverable_error_streak,
+                    }
+                )
+            else:
+                self._recoverable_error_streak = 0
+        elif result.committed:
+            self._recoverable_error_streak = 0
+            self._write_inference_log(
+                {
+                    "event": "target_committed",
+                    **event_common,
+                    "target_before": self._target_audit_record(target_before),
+                    "target_committed": self._target_audit_record(
+                        self._scheduler.target
+                    ),
+                }
+            )
+        elif int(message.error_code) == 0:
+            self._recoverable_error_streak = 0
+
+        if self._scheduler.pending is None:
+            self._published_command_audit.pop(int(message.sequence_id), None)
+
     def _control_tick(self):
         self._drain_policy_result()
         if self._shadow or not self._vla_enabled:
             return
-        if not self._control_healthy(time.monotonic()):
+        now = time.monotonic()
+        if not self._control_healthy(now):
             return
         if self._scheduler.pending is not None:
+            return
+        if self._gripper_transaction is not None:
+            self._gripper_transaction_tick(now)
             return
         if self._staged_actions is not None:
             self._queued_actions = self._staged_actions
             self._staged_actions = None
 
+        target_before = self._scheduler.target
+        active_family_before = self._scheduler.active_family
         if self._queued_actions:
-            action = self._filter_contact_action(self._queued_actions[0])
+            policy_action = np.asarray(
+                self._queued_actions[0], dtype=np.float32
+            ).copy()
+            action = self._filter_contact_action(policy_action)
+            source = "policy"
         else:
             target = self._scheduler.target
             gripper = target.gripper if target is not None else 0.0
             action = np.asarray([0, 0, 0, 0, 0, gripper], dtype=np.float32)
+            policy_action = None
+            source = "idle_hold"
         try:
             result = self._scheduler.plan(action)
         except (ValueError, RuntimeError) as exc:
@@ -517,59 +720,153 @@ class VlaBridgeNode(Node):
         if result.consume_action and self._queued_actions:
             self._queued_actions.popleft()
         if result.command is not None:
-            self._command_pub.publish(self._make_command(result.command))
+            self._publish_command(
+                result.command,
+                source=source,
+                target_before=target_before,
+                active_family_before=active_family_before,
+                policy_action=policy_action,
+                effective_action=action,
+            )
 
-    def _observe_gripper_contact(self, state):
-        if self._scheduler.active_family != "gripper":
-            self._reset_gripper_contact(clear_latch=False)
+    def _begin_gripper_transaction(self, state, pending):
+        if pending.keepalive or self._gripper_transaction is not None:
+            return
+        target = self._scheduler.target
+        if target is None or not state.position_valid:
+            return
+        actual = float(np.clip(state.gripper_position, 0.0, 1.0))
+        if not np.isfinite(actual):
+            return
+        now = self._raw_state_received_at
+        if now is None:
+            now = time.monotonic()
+        self._gripper_transaction = GripperTransaction(
+            target.gripper,
+            actual,
+            now,
+            self._gripper_guard_config,
+        )
+        self._write_inference_log(
+            {
+                "event": "gripper_transaction_started",
+                "mode": self._mode_name(),
+                "sequence_id": int(state.sequence_id),
+                "target_gripper": float(target.gripper),
+                "actual_gripper": actual,
+                "direction": (
+                    "close"
+                    if self._gripper_transaction.direction > 0.0
+                    else "open"
+                ),
+            }
+        )
+
+    def _observe_gripper_transaction(self, state):
+        transaction = self._gripper_transaction
+        if transaction is None:
             return
         if (
             self._shadow
             or not self._vla_enabled
             or not state.position_valid
-            or self._scheduler.pending is not None
             or self._scheduler.target is None
         ):
             return
         actual = float(np.clip(state.gripper_position, 0.0, 1.0))
         if not np.isfinite(actual):
-            self._reset_gripper_contact(clear_latch=False)
             return
-        if self._gripper_contact_latched:
+        now = self._raw_state_received_at
+        if now is None:
+            now = time.monotonic()
+        observation = transaction.observe(actual, now)
+        if observation.event is None or self._scheduler.pending is not None:
             return
-        if self._gripper_close_origin is None:
-            self._gripper_close_origin = actual
-            self._gripper_last_feedback = actual
+        self._finish_gripper_transaction(observation)
+
+    def _gripper_transaction_tick(self, now):
+        transaction = self._gripper_transaction
+        if transaction is None or not transaction.keepalive_due(now):
             return
-        if actual - self._gripper_close_origin >= float(
-            self._cfg("gripper_contact_min_progress")
-        ):
-            self._gripper_close_progress = True
-        stable = abs(actual - self._gripper_last_feedback) <= float(
-            self._cfg("gripper_contact_stable_delta")
-        )
-        gap = self._scheduler.target.gripper - actual
-        if (
-            self._gripper_close_progress
-            and stable
-            and gap >= float(self._cfg("gripper_contact_min_gap"))
-        ):
-            self._gripper_contact_samples += 1
-        else:
-            self._gripper_contact_samples = 0
-        self._gripper_last_feedback = actual
-        if self._gripper_contact_samples < int(
-            self._cfg("gripper_contact_stable_samples")
-        ):
-            return
-        result = self._scheduler.hold_gripper(actual)
+        target_before = self._scheduler.target
+        active_family_before = self._scheduler.active_family
+        result = self._scheduler.keep_gripper_stream_open()
         if result.command is None:
             return
-        self._gripper_contact_latched = True
-        self._command_pub.publish(self._make_command(result.command))
-        self.get_logger().info(
-            "gripper contact detected; bounded stop at feedback %.3f" % actual
+        transaction.mark_keepalive(now)
+        self._publish_command(
+            result.command,
+            source="gripper_keepalive",
+            target_before=target_before,
+            active_family_before=active_family_before,
         )
+
+    def _finish_gripper_transaction(self, observation):
+        transaction = self._gripper_transaction
+        if transaction is None:
+            return
+        target_before = self._scheduler.target
+        active_family_before = self._scheduler.active_family
+        result = self._scheduler.stop_gripper()
+        if result.command is None:
+            return
+        self._gripper_transaction = None
+        is_contact = observation.event == EVENT_CONTACT
+        is_fault = observation.event in (EVENT_NO_PROGRESS, EVENT_TIMEOUT)
+        if is_contact:
+            self._gripper_contact_latched = True
+        self._publish_command(
+            result.command,
+            source="gripper_%s" % observation.event,
+            target_before=target_before,
+            active_family_before=active_family_before,
+        )
+        self._write_inference_log(
+            {
+                "event": "target_retained",
+                "mode": self._mode_name(),
+                "sequence_id": int(result.command.sequence_id),
+                "reason": "gripper_%s" % observation.event,
+                "target_before": self._target_audit_record(target_before),
+                "target_retained": self._target_audit_record(
+                    self._scheduler.target
+                ),
+                "requested_gripper": float(transaction.target),
+                "actual_gripper": float(observation.actual),
+                "gap": float(observation.gap),
+                "progress": float(observation.progress),
+                "stable_elapsed_sec": float(
+                    observation.stable_elapsed_sec
+                ),
+                "elapsed_sec": float(observation.elapsed_sec),
+            }
+        )
+        if is_fault:
+            self._write_inference_log(
+                {
+                    "event": "no_progress_fault",
+                    "mode": self._mode_name(),
+                    "sequence_id": int(result.command.sequence_id),
+                    "reason": "gripper_%s" % observation.event,
+                    "requested_gripper": float(transaction.target),
+                    "actual_gripper": float(observation.actual),
+                    "origin_gripper": float(transaction.origin),
+                    "progress": float(observation.progress),
+                    "elapsed_sec": float(observation.elapsed_sec),
+                }
+            )
+            self._control_fault_latched = True
+            self._queued_actions.clear()
+            self._staged_actions = None
+            self.get_logger().error(
+                "gripper %s at feedback %.3f; bounded stop sent"
+                % (observation.event, observation.actual)
+            )
+        elif is_contact:
+            self.get_logger().info(
+                "gripper contact detected; bounded stop at feedback %.3f"
+                % observation.actual
+            )
 
     def _filter_contact_action(self, action):
         filtered = np.asarray(action, dtype=np.float32).copy()
@@ -583,10 +880,7 @@ class VlaBridgeNode(Node):
         return filtered
 
     def _reset_gripper_contact(self, clear_latch):
-        self._gripper_close_origin = None
-        self._gripper_last_feedback = None
-        self._gripper_close_progress = False
-        self._gripper_contact_samples = 0
+        self._gripper_transaction = None
         if clear_latch:
             self._gripper_contact_latched = False
 

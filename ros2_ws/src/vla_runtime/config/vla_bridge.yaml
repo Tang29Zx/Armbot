@@ -33,9 +33,17 @@ vla_bridge_node:
     gripper_deadband: 0.02
     gripper_max_step: 0.075
     gripper_contact_min_progress: 0.02
-    gripper_contact_min_gap: 0.04
     gripper_contact_stable_delta: 0.006
-    gripper_contact_stable_samples: 3
+    gripper_contact_stable_sec: 2.0
+    # 0.03 = 15 raw with the deployed 200..700 mapping.  This covers the
+    # firmware's 10-raw measured tolerance plus the real servo deadband, so a
+    # tiny policy step cannot block later, larger closing targets.
+    gripper_target_tolerance: 0.03
+    # EXECUTING feedback arrives after the firmware has already started its
+    # 300 ms watchdog.  50 ms makes every subsequent 10 Hz control tick due.
+    gripper_keepalive_interval_sec: 0.05
+    gripper_no_progress_timeout_sec: 0.60
+    gripper_transaction_timeout_sec: 1.50
 
     home_target: [15.0, 0.0, 2.0, -54.48]
     pitch_limits_deg: [-90.0, 90.0]

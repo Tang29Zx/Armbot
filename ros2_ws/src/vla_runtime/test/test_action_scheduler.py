@@ -59,6 +59,31 @@ def test_family_switch_ends_cartesian_before_gripper_action():
     assert gripper.command.target.gripper == 0.075
 
 
+def test_idle_cartesian_action_refreshes_same_target_without_ending_stream():
+    scheduler = _scheduler()
+    first = scheduler.plan([0.2, 0, 0, 0, 0, 0])
+    first_ack = scheduler.observe_lifecycle(
+        first.command.sequence_id, PHASE_EXECUTING, 1, 0)
+    installed = scheduler.target
+
+    keepalive = scheduler.plan([0, 0, 0, 0, 0, 0])
+
+    assert first_ack.committed
+    assert keepalive.command.mode == MODE_CARTESIAN_SERVO
+    assert keepalive.command.keepalive
+    assert keepalive.command.target == installed
+    assert scheduler.target == installed
+    assert scheduler.active_family == "cartesian"
+
+    keepalive_ack = scheduler.observe_lifecycle(
+        keepalive.command.sequence_id, PHASE_EXECUTING, 1, 0)
+
+    assert keepalive_ack.consume_action
+    assert keepalive_ack.committed
+    assert scheduler.target == installed
+    assert scheduler.active_family == "cartesian"
+
+
 def test_gripper_stream_uses_bounded_stop_when_action_goes_idle():
     scheduler = _scheduler()
     close = scheduler.plan([0, 0, 0, 0, 0, 1])
@@ -70,15 +95,39 @@ def test_gripper_stream_uses_bounded_stop_when_action_goes_idle():
     assert scheduler.active_family is None
 
 
-def test_gripper_contact_holds_feedback_and_stops_stream():
+def test_gripper_stop_preserves_installed_target():
     scheduler = _scheduler()
     close = scheduler.plan([0, 0, 0, 0, 0, 1])
     scheduler.observe_lifecycle(close.command.sequence_id, PHASE_EXECUTING, 1, 0)
+    installed = scheduler.target
 
-    stop = scheduler.hold_gripper(0.05)
+    stop = scheduler.stop_gripper()
 
     assert stop.command.mode == MODE_GRIPPER_STOP
-    assert scheduler.target.gripper == 0.05
+    assert scheduler.target == installed
+
+
+def test_gripper_keepalive_reuses_target_without_consuming_action():
+    scheduler = _scheduler()
+    close = scheduler.plan([0, 0, 0, 0, 0, 1])
+    scheduler.observe_lifecycle(
+        close.command.sequence_id, PHASE_EXECUTING, 1, 0)
+    installed = scheduler.target
+
+    keepalive = scheduler.keep_gripper_stream_open()
+
+    assert keepalive.command.mode == MODE_GRIPPER_SERVO
+    assert keepalive.command.keepalive
+    assert keepalive.command.target == installed
+    assert not scheduler.pending.consume_action
+
+    ack = scheduler.observe_lifecycle(
+        keepalive.command.sequence_id, PHASE_EXECUTING, 1, 0)
+
+    assert ack.committed
+    assert not ack.consume_action
+    assert scheduler.target == installed
+    assert scheduler.active_family == "gripper"
 
 
 def test_nonfinite_action_is_rejected():
@@ -90,11 +139,24 @@ def test_nonfinite_action_is_rejected():
 def test_failed_command_rolls_back_and_closes_family():
     scheduler = _scheduler()
     planned = scheduler.plan([0.2, 0, 0, 0, 0, 0])
-    failed = scheduler.observe_lifecycle(planned.command.sequence_id, 4, 0, 0x20)
+    failed = scheduler.observe_lifecycle(planned.command.sequence_id, 4, 0, 0xFF)
 
     assert failed.failed
     assert scheduler.target.x == 15.0
     assert scheduler.active_family is None
+
+
+def test_recoverable_error_drops_target_without_latching():
+    scheduler = _scheduler()
+    planned = scheduler.plan([0.2, 0, 0, 0, 0, 0])
+    result = scheduler.observe_lifecycle(
+        planned.command.sequence_id, 4, 0, 0x21)
+
+    assert not result.failed
+    assert result.rejected
+    assert result.recoverable
+    assert scheduler.active_family is None
+    assert scheduler.target.x == 15.0
 
 
 def test_cancel_requires_a_fresh_home_reset():

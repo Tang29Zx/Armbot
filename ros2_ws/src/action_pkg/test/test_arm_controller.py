@@ -456,9 +456,25 @@ def test_arm_not_ready_error_is_published_immediately(node):
     node.poll_status()
 
     published = node.state_pub.publish.call_args_list[-1].args[0]
-    assert published.state == ArmState.STATE_ERROR
+    assert published.state == ArmState.STATE_IDLE
     assert published.command_phase == ArmState.PHASE_FAILED
     assert published.sequence_id == 1
+    assert published.error_code == ERR_FW_NOT_READY
+
+
+def test_arm_not_ready_non_stream_still_latches(node):
+    node.state_pub = MagicMock()
+    node.handle_command(_cmd(
+        ArmCommand.MODE_END_EFFECTOR, seq=1,
+        x=15.0, y=0.0, z=2.0, pitch=-54.48, duration_sec=0.3))
+    wire_id = node._active_wire_id
+    node._i2c_read_status = lambda: _status(
+        FW_LIFECYCLE_FAILED, wire_id, FW_ERROR_ARM_NOT_READY)
+
+    node.poll_status()
+
+    published = node.state_pub.publish.call_args_list[-1].args[0]
+    assert published.state == ArmState.STATE_ERROR
     assert published.error_code == ERR_FW_NOT_READY
 
 
@@ -716,6 +732,43 @@ def test_missing_arm_servo_feedback_is_invalid(node):
     node._update_joint_feedback(packet)
 
     assert node._gripper_position == pytest.approx(0.594)
+    assert node._position_valid is False
+
+
+def test_single_transient_zero_servo_is_held_valid(node):
+    packet = bytearray(32)
+    reset_raw = [200.0, 500.0, 177.0, 129.0, 408.0, 500.0]
+    for index, value in enumerate(reset_raw):
+        struct.pack_into('<f', packet, 8 + index * 4, value)
+    node._update_joint_feedback(packet)
+    assert node._position_valid is True
+
+    struct.pack_into('<f', packet, 8 + 5 * 4, 0.0)
+    node._update_joint_feedback(packet)
+
+    assert node._position_valid is True
+    assert node._servo_raw_positions[5] == pytest.approx(500.0)
+    assert node._joint_position == pytest.approx([
+        0.0,
+        1.95616,
+        -1.55404,
+        -1.35298,
+        0.0,
+    ], abs=1e-4)
+
+
+def test_two_transient_zero_servos_are_invalid(node):
+    packet = bytearray(32)
+    reset_raw = [200.0, 500.0, 177.0, 129.0, 408.0, 500.0]
+    for index, value in enumerate(reset_raw):
+        struct.pack_into('<f', packet, 8 + index * 4, value)
+    node._update_joint_feedback(packet)
+    assert node._position_valid is True
+
+    struct.pack_into('<f', packet, 8 + 4 * 4, 0.0)
+    struct.pack_into('<f', packet, 8 + 5 * 4, 0.0)
+    node._update_joint_feedback(packet)
+
     assert node._position_valid is False
 
 
@@ -1252,7 +1305,7 @@ def test_missing_terminal_lifecycle_times_out_and_clears_queue(node):
     assert node._active_wire_id == 0
 
 
-def test_stream_end_uses_full_motion_window_before_terminal_timeout(node):
+def test_stream_end_uses_full_motion_window_then_locks_error(node):
     import time
     node.set_parameters([
         Parameter('command_timeout_sec', Parameter.Type.DOUBLE, 0.05),
@@ -1282,11 +1335,10 @@ def test_stream_end_uses_full_motion_window_before_terminal_timeout(node):
 
     time.sleep(0.20)
     node.poll_status()
-    # F/G stream-end without a terminal firmware lifecycle is treated as
-    # completed so the VLA scheduler can release its pending and continue.
-    assert node._state == ArmState.STATE_SUCCEEDED
-    assert node._command_phase == ArmState.PHASE_COMPLETED
-    assert node._error_code == 0
+    assert node._state == ArmState.STATE_ERROR
+    assert node._command_phase == ArmState.PHASE_FAILED
+    assert node._error_code == ERR_CMD_TIMEOUT
+    assert 'terminal firmware lifecycle' in node._error_message
     assert node._active_wire_id == 0
 
 

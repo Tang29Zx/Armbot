@@ -20,6 +20,12 @@ PHASE_EXECUTING = 2
 PHASE_COMPLETED = 3
 PHASE_FAILED = 4
 
+# Controller-mapped firmware error codes that are transient target rejections
+# (NO_IK_SOLUTION=0x20, ARM_NOT_READY=0x21, STREAM_STEP_TOO_LARGE=0x26).  The
+# controller reports these without latching ERROR; the VLA scheduler must drop
+# the rejected target and keep going instead of stopping the heartbeat.
+RECOVERABLE_ERROR_CODES = frozenset((0x20, 0x21, 0x26))
+
 
 @dataclass(frozen=True)
 class SchedulerConfig:
@@ -49,6 +55,7 @@ class CommandSpec:
     mode: int
     target: Target
     duration_sec: float
+    keepalive: bool = False
 
 
 @dataclass(frozen=True)
@@ -62,6 +69,9 @@ class AckResult:
     matched: bool = False
     consume_action: bool = False
     failed: bool = False
+    committed: bool = False
+    rejected: bool = False
+    recoverable: bool = False
 
 
 @dataclass
@@ -71,6 +81,7 @@ class _Pending:
     family: str | None
     consume_action: bool
     end_stream: bool
+    keepalive: bool = False
 
 
 class ActionScheduler:
@@ -100,17 +111,36 @@ class ActionScheduler:
         self.active_family = None
         self.pending = None
 
-    def hold_gripper(self, actual_gripper):
-        """Stop an acknowledged gripper stream at contact feedback."""
+    def stop_gripper(self):
+        """Stop an acknowledged gripper stream without rewriting its target."""
         if self.target is None:
             raise RuntimeError("scheduler must be reset from Home first")
         if self.pending is not None or self.active_family != "gripper":
             return PlanResult(None, False)
-        actual = float(np.clip(actual_gripper, 0.0, 1.0))
-        if not math.isfinite(actual):
-            raise ValueError("gripper feedback must be finite")
-        self.target = replace(self.target, gripper=actual)
         return self._end_stream()
+
+    def keep_gripper_stream_open(self):
+        """Refresh the installed gripper target without consuming an action."""
+        if self.target is None:
+            raise RuntimeError("scheduler must be reset from Home first")
+        if self.pending is not None or self.active_family != "gripper":
+            return PlanResult(None, False)
+        command = CommandSpec(
+            self._take_sequence(),
+            MODE_GRIPPER_SERVO,
+            self.target,
+            self.config.stream_watchdog_sec,
+            keepalive=True,
+        )
+        self.pending = _Pending(
+            command.sequence_id,
+            self.target,
+            "gripper",
+            False,
+            False,
+            keepalive=True,
+        )
+        return PlanResult(command, False)
 
     def _take_sequence(self):
         sequence = self._next_sequence
@@ -175,6 +205,25 @@ class ActionScheduler:
         )
         return PlanResult(command, False)
 
+    def _keep_cartesian_stream_open(self):
+        """Refresh an idle Cartesian stream without changing its target."""
+        command = CommandSpec(
+            self._take_sequence(),
+            MODE_CARTESIAN_SERVO,
+            self.target,
+            self.config.stream_watchdog_sec,
+            keepalive=True,
+        )
+        self.pending = _Pending(
+            command.sequence_id,
+            self.target,
+            "cartesian",
+            True,
+            False,
+            keepalive=True,
+        )
+        return PlanResult(command, False)
+
     def plan(self, action):
         if self.target is None:
             raise RuntimeError("scheduler must be reset from Home first")
@@ -183,6 +232,12 @@ class ActionScheduler:
 
         deltas, gripper = self._scaled_action(action)
         family = self._desired_family(deltas, gripper)
+        if self.active_family == "cartesian" and family is None:
+            # A below-deadband policy frame means "hold here", not "leave
+            # Cartesian control".  Refreshing the same installed target keeps
+            # the firmware watchdog alive without accumulating XYZ or forcing
+            # an F transition that may take the full terminal window.
+            return self._keep_cartesian_stream_open()
         if self.active_family is not None and family != self.active_family:
             return self._end_stream()
         if family is None:
@@ -253,10 +308,17 @@ class ActionScheduler:
         if int(error_code) != 0 or int(phase) == PHASE_FAILED:
             self.pending = None
             self.active_family = None
-            return AckResult(matched=True, failed=True)
+            recoverable = int(error_code) in RECOVERABLE_ERROR_CODES
+            return AckResult(
+                matched=True,
+                failed=not recoverable,
+                rejected=True,
+                recoverable=recoverable,
+            )
 
         completed = int(phase) == PHASE_COMPLETED
         installed = int(phase) == PHASE_EXECUTING or completed
+        committed = False
         if self.pending.end_stream:
             if not completed:
                 return AckResult(matched=True)
@@ -266,7 +328,12 @@ class ActionScheduler:
         else:
             self.target = self.pending.target
             self.active_family = self.pending.family
+            committed = True
 
         consume = self.pending.consume_action
         self.pending = None
-        return AckResult(matched=True, consume_action=consume)
+        return AckResult(
+            matched=True,
+            consume_action=consume,
+            committed=committed,
+        )

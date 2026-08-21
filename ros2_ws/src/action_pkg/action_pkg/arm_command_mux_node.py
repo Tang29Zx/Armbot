@@ -10,6 +10,13 @@ from std_msgs.msg import Bool, Empty
 from std_srvs.srv import SetBool
 
 
+# Controller-mapped firmware error codes that are transient target rejections
+# (NO_IK_SOLUTION=0x20, ARM_NOT_READY=0x21, STREAM_STEP_TOO_LARGE=0x26).  The
+# controller reports these without latching ERROR; the mux must not revoke VLA
+# control for them.
+_RECOVERABLE_ERROR_CODES = frozenset((0x20, 0x21, 0x26))
+
+
 class ArmCommandMuxNode(Node):
     def __init__(self, **kwargs):
         super().__init__("arm_command_mux_node", **kwargs)
@@ -89,7 +96,7 @@ class ArmCommandMuxNode(Node):
             "enable_service": "/arm/set_vla_enabled",
             "heartbeat_timeout_sec": 0.30,
             "state_timeout_sec": 0.50,
-            "feedback_invalid_streak": 3,
+            "feedback_invalid_streak": 5,
         }
         for name, value in defaults.items():
             self.declare_parameter(name, value)
@@ -163,7 +170,7 @@ class ArmCommandMuxNode(Node):
         else:
             if not state.position_valid:
                 reasons.append("joint feedback is invalid")
-            if state.error_code != 0:
+            if state.error_code != 0 and state.error_code not in _RECOVERABLE_ERROR_CODES:
                 reasons.append("arm error_code=%d" % state.error_code)
             if state.state not in (ArmState.STATE_IDLE, ArmState.STATE_SUCCEEDED):
                 reasons.append("arm must be idle before VLA acquisition")
@@ -192,7 +199,7 @@ class ArmCommandMuxNode(Node):
                 )
         if state.state in (ArmState.STATE_ERROR, ArmState.STATE_ESTOP):
             return "arm entered ERROR/ESTOP"
-        if state.error_code != 0:
+        if state.error_code != 0 and state.error_code not in _RECOVERABLE_ERROR_CODES:
             return "arm error_code=%d" % state.error_code
         return ""
 

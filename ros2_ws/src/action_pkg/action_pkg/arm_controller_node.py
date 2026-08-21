@@ -199,6 +199,7 @@ class ArmControllerNode(Node):
         self._last_position_valid = False
         self._joint_position = [0.0] * 5
         self._servo_raw_positions = [0.0] * I2C_JOINT_COUNT  # servo raw (0..1000)
+        self._servo_raw_hold = [0.0] * I2C_JOINT_COUNT  # last fully-valid snapshot
         self._gripper_position = 0.0
 
         # --- emergency stop (contract sec 3.2 / 5.4): latched ---
@@ -1144,21 +1145,6 @@ class ArmControllerNode(Node):
         self._clear_active_motion()
         self._stream_open = False
         self._stream_open_family = None
-        if self._is_stream_end(mode):
-            # F/G carry no wire duration and the firmware may not confirm the
-            # terminal state after a large deceleration window.  Treat the
-            # stream as ended instead of locking the control stack with
-            # ERR_CMD_TIMEOUT, so the VLA scheduler can release its pending
-            # stream-end and continue with the next action family.
-            self.get_logger().warn(
-                'stream end %s acknowledged but no terminal firmware '
-                'lifecycle within %.2fs (seq=%d, wire_id=%d); '
-                'treating stream as ended'
-                % (_motion_mode_tag(mode), timeout_sec, seq, wire_id))
-            self._set_state(
-                ArmState.STATE_SUCCEEDED, seq, ArmState.PHASE_COMPLETED)
-            self.publish_state()
-            return
         self._set_error(
             ERR_CMD_TIMEOUT,
             'no terminal firmware lifecycle within %.2fs '
@@ -1204,12 +1190,37 @@ class ArmControllerNode(Node):
 
         Bytes 8..31 contain float32[6] servo raw positions for ids 1..6.
         Refresh the five arm joints using servo_id_map and mark them valid.
+
+        The firmware USART2 feedback link intermittently reports a single
+        servo raw as 0.0 for one to two frames without raising a firmware
+        error.  Tolerate exactly one invalid channel per frame by holding
+        the last fully-valid raw for that channel, so a transient single
+        drop does not flip position_valid and trip the VLA watchdog.  Two or
+        more invalid channels still fail closed.
         """
         raw = bytes(data)
+        candidate = list(self._servo_raw_positions)
         for i in range(I2C_JOINT_COUNT):
             off = 8 + i * 4
             if off + 4 <= len(raw):
-                self._servo_raw_positions[i] = struct.unpack_from('<f', raw, off)[0]
+                candidate[i] = struct.unpack_from('<f', raw, off)[0]
+        valid = [
+            math.isfinite(pos) and 0.0 < pos <= 1000.0
+            for pos in candidate
+        ]
+        invalid = [i for i, ok in enumerate(valid) if not ok]
+        if len(invalid) == 1:
+            held = self._servo_raw_hold[invalid[0]]
+            if math.isfinite(held) and 0.0 < held <= 1000.0:
+                candidate[invalid[0]] = held
+                valid[invalid[0]] = True
+                invalid = []
+        if not invalid:
+            self._servo_raw_positions = candidate
+            if all(valid):
+                self._servo_raw_hold = list(candidate)
+        else:
+            self._servo_raw_positions = candidate
         # Map raw servo positions to arm joints (rad) for ArmState + /joint_states.
         zeros = self._cfg('joint_zero_offsets')
         dirs = self._cfg('joint_directions')
@@ -1431,6 +1442,8 @@ class ArmControllerNode(Node):
                      ArmCommand.MODE_END_EFFECTOR,
                      ArmCommand.MODE_CARTESIAN_SERVO))
                 or (error == FW_ERROR_STREAM_STEP_TOO_LARGE
+                    and self._is_stream_target(failed_mode))
+                or (error == FW_ERROR_ARM_NOT_READY
                     and self._is_stream_target(failed_mode)))
             if recoverable_rejection:
                 self._set_recoverable_rejection(code, message)
