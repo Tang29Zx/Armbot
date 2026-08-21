@@ -15,6 +15,7 @@ __pycache__/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+*.egg-info/
 
 #=========================
 #Python virtual environments
@@ -96,16 +97,13 @@ HybrIK/
 #=========================
 #Codex
 #=========================
-<<<<<<< HEAD
 .codex
-=======
-.codex
-MEMORY.md
 
 #=========================
 #RDK video runtime artifacts
 #=========================
 /rdk_video_push/logs/
+/docker/vla-runtime/logs/
 *.pid
 *.h264
 
@@ -113,5 +111,3 @@ MEMORY.md
 #WorkBuddy
 #=========================
 .workbuddy/
-
->>>>>>> origin/main

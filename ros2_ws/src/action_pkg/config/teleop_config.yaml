@@ -1,0 +1,42 @@
+arm_teleop_node:
+  ros__parameters:
+    shadow_mode: false
+    control_rate_hz: 10.0
+    joy_timeout_sec: 0.5
+    state_timeout_sec: 0.5
+    deadzone: 0.12
+    trigger_deadzone: 0.05
+
+    translation_speed_cm_sec: 1.5
+    pitch_speed_deg_sec: 5.0
+    wrist_roll_speed_deg_sec: 20.0
+    gripper_speed_sec: 0.5
+    # Direct U targets are bounded from the last matching EXECUTING state.
+    # The deployed firmware rejects adjacent targets at 12 degrees; keep a
+    # 3-degree scheduling/quantization margin.  The gripper's 0..1 travel is
+    # 500 raw = 120 degrees, so 0.075 is 37.5 raw = 9 degrees.
+    gripper_stream_max_target_step: 0.075
+    wrist_stream_max_target_step_deg: 9.0
+    gripper_contact_min_progress: 0.02
+    gripper_contact_min_gap: 0.04
+    gripper_contact_stable_delta: 0.006
+    gripper_contact_stable_samples: 3
+    command_duration_sec: 0.09
+    stream_watchdog_sec: 0.30
+    home_gripper_duration_sec: 1.0
+    home_gripper_open_tolerance: 0.10
+    home_wrist_roll_duration_sec: 1.0
+    home_duration_sec: 2.0
+
+    home_target: [15.0, 0.0, 2.0, -54.48]
+    home_joint_deg: [0.0, 112.08, -89.04, -77.52, 0.0]
+    # Lobot feedback is quantized at about 0.24 deg/raw tick.  Keep one tick
+    # above the 5 deg geometric tolerance so a 5.04 deg reading is not an
+    # artificial Home failure.
+    home_joint_tolerance_deg: 5.25
+    home_stable_samples: 3
+    home_feedback_timeout_sec: 3.0
+    chord_hold_sec: 1.0
+
+    pitch_limits_deg: [-90.0, 90.0]
+    wrist_roll_limits_deg: [-90.0, 90.0]

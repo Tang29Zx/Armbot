@@ -1,6 +1,7 @@
-from setuptools import find_packages, setup
-import os
 from glob import glob
+import os
+
+from setuptools import find_packages, setup
 
 package_name = 'action_pkg'
 
@@ -27,6 +28,10 @@ setup(
     entry_points={
         'console_scripts': [
             'arm_controller = action_pkg.arm_controller_node:main',
+            'arm_state_filter = action_pkg.arm_state_filter_node:main',
+            'arm_command_mux = action_pkg.arm_command_mux_node:main',
+            'arm_teleop = action_pkg.arm_teleop_node:main',
+            'vla_image_relay = action_pkg.vla_image_relay_node:main',
             # Backward-compatible alias for the old i2c_controller entry point.
             'i2c_controller = action_pkg.arm_controller_node:main',
         ],

@@ -1,0 +1,524 @@
+# 项目记忆
+
+## 项目概况
+
+- 项目名：Armbot
+- 最近更新：2026-08-21
+- 技术栈：ROS 2 Humble、Python 3.10、I2C
+- 构建与依赖：colcon、ament、APT、pip
+- 主要目录：`ros2_ws/src`、`rdk_video_push`、`docs`、`.github/workflows`
+
+## 长期约定
+
+- 机械臂末端坐标单位已由用户确认使用厘米（cm）。
+- 上层控制优先使用 `action_interfaces` 的类型化 ROS 2 消息；字符串 Topic 仅用于兼容和调试。
+- 机械臂与底盘节点分别拥有对应的 I2C 设备，调试脚本直连 I2C 前必须停止相关 ROS 节点。
+- STM32 串口舵机固件开机执行 2 秒复位，标称末端坐标为
+  `(15, 0, 2) cm`，复位舵机值反解的末端 pitch 约为 `-54.48 deg`。
+- 夹爪规范值固定为 `0=open`、`1=closed`；STM32 理论范围为
+  `raw 200=open`、`raw 700=closed`，开机复位值 `raw 226` 接近全开。
+- 当前 I2C v3 保持固定 32 字节布局：ROS `MODE_CARTESIAN_SERVO=5`/`T` 更新
+  滚动笛卡尔目标，`MODE_CARTESIAN_SERVO_END=6`/`F` 正常结束流；`H` 停指定舵机，
+  `S` 全局急停。普通运动要求 ROS/STM32 版本一致，`S` 保留跨版本停止能力。
+- VLA 数据采集 v1 使用“每个 episode 一个 rosbag2 + manifest”作为不可变事实层；
+  recorder 只订阅图像、Joy、命令、原始状态和滤波状态，不打开 I2C、不发布运动命令。
+
+## Xbox 手柄映射
+
+以下映射由用户在 RDK 当前 `joy_node` 上实测，消息类型为 `sensor_msgs/msg/Joy`：
+
+- `axes[0]`：左摇杆水平，向左 `+1.0`，向右 `-1.0`。
+- `axes[1]`：左摇杆垂直，向上 `+1.0`，向下 `-1.0`。
+- `axes[2]`：右摇杆水平，向左 `+1.0`，向右 `-1.0`。
+- `axes[3]`：右摇杆垂直，向上 `+1.0`，向下 `-1.0`。
+- `axes[4]`：RT，松开 `+1.0`，完全按下 `-1.0`，中间为连续值。
+- `axes[5]`：LT，松开 `+1.0`，完全按下 `-1.0`，中间为连续值。
+- `buttons[0]`：A；`buttons[1]`：B；`buttons[3]`：X；`buttons[4]`：Y。
+- `buttons[6]`：LB；`buttons[7]`：RB；松开为 `0`，按下为 `1`。
+
+遥控安全映射：A 上升沿切换使能；B 请求锁存急停；`LB+RB+X` 长按解除
+错误/急停；`LB+RB+Y` 长按回零。急停、错误、Joy/ArmState 超时后必须重新
+回零同步，解除锁存本身不会触发运动。
+
+2026-07-16 用户明确选择取消 RDK 遥操层的全部 XYZ 矩形限位；XYZ 目标直接累计，
+最终由 STM32 IK、关节角和舵机范围决定是否执行。请求 pitch 仍在遥操层限制为
+`[-90, 90] deg`。`NO_IK_SOLUTION` 是非锁存目标拒绝：控制器报告
+`STATE_IDLE/error_code=0x0020`；遥操回退最后成功目标并等待输入回中后自动恢复，
+不需要清错或 Home。其他错误仍保持原安全恢复流程。
+
+## 已验证记录
+
+- 2026-08-21：夹爪“动一下即 `0x0022` 停机”已结合对应 STM32 v3 源码纠正
+  根因。WSL 的 `LeArm-v3-direct-servo.hex` SHA-256 精确匹配交接记录
+  `32380e4d...`；固件 `direct_servo_submit()` 允许相同绝对目标 `U`，失败并非
+  重复目标非法。RDK 日志显示 `seq=266 EXECUTING` 到 `seq=267 BAD_COMMAND`
+  仅约 `299.6 ms`：bridge 等到已延迟约 120 ms 的 matching `EXECUTING` 后又等待
+  150 ms，并受 10 Hz tick 量化，第二条 `U` 恰好落在 300 ms watchdog 边界；固件
+  主循环先进入 `stopping`，随后 `U` 因 `stopping != NONE` 被外层映射为
+  `BAD_COMMAND`。bridge 已改为事务创建后首个 keepalive 立即到期，后续间隔门限
+  `50 ms`（10 Hz 下实际约每 100 ms），到位/接触仍发送 `H`，且不把 `0x0022`
+  降级为可恢复错误。新增首 tick 续传回归，打包镜像内完整测试 `29 passed`；镜像
+  `sha256:56f76cec463b...` 已用 `--no-deps` 单独部署。部署前显式关闭 VLA，部署后
+  RDK 为 `IDLE/position_valid=true/error_code=0/seq=587`，未发送实机动作。
+
+- 2026-08-21：实机审计确认“夹好后不上抬”的直接时序：本轮共发布 504 条命令，
+  其中 361 条 Cartesian `T`（76 条同目标 keepalive）和 14 条 `F`；前 13 条 `F`
+  正常结束，最后 `F seq=508` 在 `EXECUTING` 停留完整 33 秒后明确报
+  `ERR_CMD_TIMEOUT(0x0016)`。触发前夹爪逻辑 target 已提交为约 `0.965`，实际反馈
+  稳定在约 `0.816`；旧 bridge 仅在短暂的 `active_family=gripper` 且无 pending 时
+  检测接触，`U seq=497` ACK 后约 12.8 ms 即因下一 policy action 发送 `H seq=498`，
+  不可能收齐 3 个稳定反馈样本，因此接触锁存失效，后续继续闭合的模型输出又触发
+  Cartesian→gripper 的 `F`。已改为独立、反馈驱动的夹爪事务：每个已安装 `U`
+  目标在反馈解决前阻塞后续动作，按 150 ms 间隔发送同目标 `U keepalive`；到达目标
+  或“先有有效进展、再稳定且仍有目标差”时发送有界 `H` 并把 scheduler target 回写
+  为实际反馈，接触时锁存并抑制后续继续闭合输出；600 ms 完全无进展或 1.5 s 事务
+  未完成则发送 `H`、记录 `no_progress_fault` 并停止 heartbeat，不能把舵机故障误当
+  接触。新增确定性 `gripper_guard.py`，审计新增 `gripper_transaction_started`、真实
+  `target_clamped`、`no_progress_fault`。打包后 `vla_runtime` pytest/colcon 均为
+  28 tests、0 failures/errors；bridge 镜像 `sha256:afad43e7ebe4...` 已用 `--no-deps`
+  单独部署，OpenPI 保持已预热，推理约 230–236 ms、容器 heartbeat 约 20 Hz，RDK
+  mux 已发现订阅。部署前后均显式保持 `vla_enabled=false`，控制栈未重启、未发送
+  VLA 动作。RDK 时钟已从 PC 手动校准为 Asia/Shanghai 当前时间并写入 RTC；板端仍
+  无 NTP 服务，长时间运行可能有漂移。
+
+- 2026-08-21：针对上一轮 VLA 中 15 次笛卡尔 `F` 各阻塞 33 秒、随后共出现
+  37 次 `ARM_NOT_READY` 的证据，已先完成主机侧收敛修复。bridge scheduler 在
+  已打开 Cartesian 流且策略 action 低于 deadband 时，改为发送相同已确认绝对
+  target 的 `T keepalive`；它刷新 300 ms watchdog、经匹配 `EXECUTING` 后消费
+  no-op action，但不累计 XYZ。只有明确切换夹爪/腕转时仍发送 `F`。controller
+  保留 F/G 的 `max_duration_sec + command_timeout_sec=33 s` 完整终态窗口，超时后
+  不再伪造 `SUCCEEDED/COMPLETED`，恢复为锁存 `ERR_CMD_TIMEOUT`。结构化
+  `inference.jsonl` 新增 `command_published`、`lifecycle_observed`、
+  `target_committed`、`target_rejected`、`recoverable_error`，可直接审计实际发布的
+  mode/action/绝对 target 与 ACK；本轮未实现 XYZ clamp 或 no-progress guard，
+  因而不伪造 `target_clamped/no_progress_fault` 事件。PC 新 bridge 镜像
+  `sha256:143521c48af4...` 已重建并重启，完整 `vla_runtime` 回归 19 passed；RDK
+  controller/test 已备份到
+  `~/.local/state/armbot/deploy-backups/20260821-vla-keepalive-audit-pre` 后同步重建，
+  controller+mux 回归 89 tests、0 failures/errors，源码/build symlink 哈希一致。
+  部署期间 RDK 控制栈始终为空，未 Home、未启用 VLA、未发送 I2C 运动命令；实机
+  `T keepalive` 与真实动作族切换仍待后续显式 Home 后验收。RDK 本次开机时间仍为
+  `2000-01-01`，实机日志联调前必须先恢复正确时钟。
+
+- 2026-08-20：四层 recoverable 修复后的最新实机复测：VLA 从 wire=462 连续
+  运行到 491+（约 100 秒）未被中断，`F` 流结束命令两次 33s 无终态都被宽容
+  处理（`stream end F ... treating stream as ended`）并继续发命令，mux 不再
+  撤销。**新现象/未解决**：机械臂"成功退出但不上抬"——bridge 持续下发 z
+  正增量（216/222 帧 dz>0，幅度 0.05~0.26 cm）、夹爪保持闭合，固件持续 ACK
+  （lifecycle=2/error=0/wire 递增），但机械臂关节反馈纹丝不动
+  （j2=0.297/j3=-0.855/j4=-0.431 恒定），疑似 scheduler 按 ACK 累加
+  target.z（home z=2.0cm 已累加大幅正向）与固件实际 IK 执行不一致：目标 z
+  可能已超出固件 IK 可达域但固件只 ACK 不报 NO_IK，或 z 命令未被真实执行。
+  这是与"夹爪 raw 287 后不动"同类的"固件 ACK 但物理未到位"问题。下一步：
+  先确认当前机械臂实际 z 高度 vs scheduler 累计 target.z，再决定是固件 IK
+  上限问题还是动作映射问题。控制栈本次 PID 47384。遗留未做：固件续期 HEX
+  `32380e4d...` 未刷写；RDK 控制栈与 bridge 均需重启加载最新代码后复测。
+
+- 2026-08-20：承接上条三层修复后复测，`ARM_NOT_READY` 瞬态（wire=455
+  error=3，456 即恢复）虽已被 controller 按 recoverable 处理（WARN+error=
+  0x21），bridge 仍报 `VLA command execution disabled`、mux 报
+  `VLA heartbeat timeout` 撤销。根因：bridge `_control_healthy()` 与
+  `_observation_fresh()` 独立于 scheduler 之外，对 `raw.error_code != 0`
+  直接扣留心跳，未被 recoverable 逻辑覆盖。已给两处都加
+  `RECOVERABLE_ERROR_CODES={0x20,0x21,0x26}` 豁免（从 action_scheduler
+  导入），心跳在瞬态可恢复错误下继续发布。容器镜像重建，scheduler/
+  policy_client/inference_logging 回归 14 passed，bridge 容器已重启。
+  至此 controller/mux/scheduler/bridge 心跳四层对可恢复错误码行为一致：
+  丢目标继续不停止。固件根治（续期 HEX `32380e4d...`）仍未做。
+
+- 2026-08-20：实机复测中 VLA 运行约 60 秒后固件对 wire_id=294 主动报
+  `ARM_NOT_READY`（error=3，下一帧 295 即恢复正常），controller 原把它当
+  不可恢复错误锁 `0x0021`，mux 撤销 VLA。排查发现 controller 的 recoverable
+  机制此前对 VLA 链路实际无效：bridge scheduler `observe_lifecycle` 只认
+  `error_code!=0 或 phase==FAILED` 即 `failed=True` 锁存，导致之前的
+  `NO_IK(0x20)/STREAM_STEP_TOO_LARGE(0x26)` 可恢复在 VLA 下同样会停心跳。
+  已做三层修复：① controller 把 `ARM_NOT_READY` 对流目标加入 recoverable
+  （WARN+IDLE/PHASE_FAILED，非流命令仍锁错）；② bridge scheduler 新增
+  `RECOVERABLE_ERROR_CODES={0x20,0x21,0x26}`，可恢复错误清 pending 回退
+  target 但不返回 failed（心跳继续）；③ mux `_runtime_health_reason` 与
+  `_enable_reasons` 对可恢复错误码不再撤销/拒绝。RDK controller+mux 回归
+  89 passed，bridge 容器 scheduler 8 passed，bridge 镜像已重建重启，RDK
+  控制栈需重启加载新 controller/mux。固件根治（续期 HEX `32380e4d...`）
+  仍未做，超长毛刺/真持续故障仍会兜底 STOP。
+
+- 2026-08-20：实机复测确认瞬时 servo raw=0.0 毛刺可连续 2~3 帧且随机出现在
+  单路（servo1/2/4/5/6 均出现过），固件 error=0、对 STOP 正常 COMPLETED，
+  属 STM32/USART2 反馈链路间歇性损坏帧，与历史 `SERVO_FEEDBACK_FAILED`
+  同源（那次六路全 0）。据此把前条 3 帧去抖升级为两层缓解：① controller
+  `_update_joint_feedback` 容忍"6 路中仅 1 路瞬时无效"——用最近全有效快照
+  `_servo_raw_hold` 替代该路并保持 `position_valid=true`，≥2 路同时无效仍
+  判 false（不掩盖真实故障），且始终更新 raw 保持固件 `SERVO_FEEDBACK_FAILED`
+  诊断准确；② mux `feedback_invalid_streak` 3→5（约 500ms 兜底多路偶发）。
+  controller+mux 回归 86 passed，本地与 RDK 同步重建。注意：实机也观测到
+  夹爪闭合流曾被固件以 `0x0026 STREAM_STEP_TOO_LARGE` 拒绝（wire 359，
+  scheduler 按 ACK 累加 target 超前于固件实际位置导致单步超 12 度），以及
+  `mode=P` 夹爪命令 4s 无终态报 0x0016，这些固件侧收敛/执行问题仍待刷
+  续期 HEX（`32380e4d...`）根治，软件仅在 bridge 侧半量程等安全默认下运行。
+
+- 2026-08-20：实机 VLA 闭环暴露出"瞬时单路 servo raw=0.0 导致 position_valid
+  单帧翻转"的偶发问题，以及 F/G 流结束命令 33s 无固件终态的问题。已做两处
+  软件缓解（不覆盖固件）：① mux 对 `position_valid=false` 改为连续 3 帧才
+  撤销（`feedback_invalid_streak=3`），单帧 100ms 毛刺不再打断 VLA，真持续
+  故障仍会 3 帧后 STOP；② controller 对 F/G 流结束命令超时不再锁
+  `ERR_CMD_TIMEOUT(0x0016)`，改为 WARN 并发布 `SUCCEEDED/COMPLETED` 让 bridge
+  scheduler 释放 pending 继续下一动作族，非流命令超时仍锁 0x0016。另在
+  controller `_update_joint_feedback` 后新增 `position_valid` 翻转诊断日志，
+  打印六路 servo raw 与 lifecycle/error/wire_id。实机证据：去抖修复后 VLA
+  从 wire_id=73 连续运行到 366（约 90 秒）未被瞬时毛刺打断，后因 F 超时
+  0x0016 停机；固件对 STOP 能正常回 COMPLETED，说明固件健康，F 收敛超时是
+  固件侧问题，根治需刷 MEMORY 记录中的续期 HEX（`32380e4d...`）待验证。
+  改动位于 `action_pkg/arm_command_mux_node.py`、`arm_controller_node.py`，
+  本地与 RDK 均已同步重建，controller+mux 回归 84 passed。桥容器 bridge 侧
+  无代码改动。重启控制栈后需重新 Home 再启用 VLA。
+
+- 2026-08-19：PC 与 RDK 的直连网线已配置为持久静态网段：PC
+  `enp130s0=192.168.50.1/24`、RDK `eth0=192.168.50.2/24`，两端均无网关且
+  `ipv4.never-default=yes`，不会抢占 Wi-Fi 默认路由。PC UFW 仅允许 RDK 有线地址在
+  `enp130s0` 入站 Domain 29 所需 UDP `14650:14899`。PC Docker bridge 的
+  `PC_DDS_IP` 已切到 `192.168.50.1`，RDK 与仓库 `config/fastdds.xml` 的 UDP
+  allowlist 已切到 `192.168.50.2`；板端旧配置备份为
+  `~/.local/state/armbot/config-backups/fastdds-20260819-before-wired-dds.xml`。
+  `ssh rdk` 也已改为有线地址。双向 ping、SSH、ROS 端点均已验证；`/vla/image`
+  约 10 Hz，结构化推理日志持续写入，最终状态为 `vla_enabled=false`、机械臂
+  `IDLE/error_code=0`。本次切网未启用 VLA、未发送运动命令，重新控制前仍须显式 Home。
+
+- 2026-08-07：已为 Arch/Ubuntu PC → Fast DDS Domain 29 → RDK 的 OpenPI 在线
+  推理链新增 Docker 适配源码。GPU OpenPI server 与 ROS 2 Humble bridge 分容器；
+  模型 websocket 只绑定 PC loopback，只有 bridge 使用 host network。RDK 侧新增
+  10 Hz 最新压缩帧 `/vla/image` relay、Xbox/VLA 排他 command mux、显式 Home
+  获取门和 300 ms heartbeat watchdog；shadow 默认不发布 heartbeat，因此不可能
+  获取实机控制权。动作调度保持训练语义，按固件回执提交 held target、限制单次动作
+  和 chunk、在流族切换前发送 END/STOP，并对命令失败锁存控制故障。纯调度、图像和
+  OpenPI wire-format 测试为 `10 passed`，Ruff、Python AST、YAML、XML、shell syntax
+  与 `git diff --check` 均通过，msgpack 字节与 OpenPI client 完全一致。当前电脑没有
+  Docker/ROS 2，且用户明确本轮不连接 RDK，所以镜像构建、ROS 包回归、DDS 联通和
+  故障注入仍待后续环境验收；本轮未提交、推送、部署或启动控制栈。
+
+- 2026-08-07：用户复核发现
+  `episode_20260806T092330Z_20584923` 属于夹住抬升途中报错后手动停止的数据，已从
+  42 条候选训练集中排除。当前训练数据集为
+  `/home/tang/Projects/armbot/vla_data/lerobot/local/armbot_pi05_fixed_pick_41`，共
+  41 episodes、15,411 帧；OpenPI 配置和实验名使用
+  `local/armbot_pi05_fixed_pick_41` / `fixed-pick-41-v1`。旧 42 条导出保留为处理历史，
+  不能再作为当前 checkpoint 的数据口径。
+
+- 2026-08-07：本轮定点药盒抓取 61 条原始 episode 已完成统一 QC 和 OpenPI/LeRobot
+  v2.1 转换。外部处理清单覆盖全部数据：28 条 `success_usable`、14 条
+  `success_crop`、16 条 `discard`、3 条 `out_of_scope`；正式训练集共 42 episodes、
+  15,625 帧，位于
+  `/home/tang/Projects/armbot/vla_data/lerobot/local/armbot_pi05_fixed_pick_42`。所有输出
+  PNG 均严格解码为 RGB 224×224，状态/动作均有限且索引连续；OpenPI 锁定的 LeRobot
+  commit `0cf864870cf29f4738d3ade893e6fd13fbd7cdb5` 已按标准缓存布局读回 image
+  `[3,224,224]`、state `[6]`、10 步 action chunk `[10,6]`。一张落入训练窗口的截断
+  JPEG 已按内容 SHA-256 精确剔除并因果回退到前一正常帧；其余 9 张原始轻微截断 JPEG
+  均在训练窗口之外。原始数据全量组合 SHA-256 在转换前后保持
+  `00c5ab449b17de1e7372219bc7c51091b2bb0aa08fbe74fd20eed03489690e91`。
+
+- 2026-08-06：`vla_dataset` 新增显式人工 review 和只读 rosbag2 → OpenPI 固定
+  LeRobot v2.1 转换器。v1 协议固定为 10 Hz：状态为 5 关节 rad + 绝对夹爪，动作
+  为 XYZ cm/pitch deg/wrist rad 的下一控制周期目标增量 + 绝对夹爪；图像按比例补边
+  到 224×224。转换要求普通命令具有固件 `EXECUTING/COMPLETED` 回执；短间隔流式
+  目标可按 controller 最新目标队列语义被同族后继覆盖，但必须在 1 秒内由已确认目标
+  或结束/停止命令收束。孤立无效状态可因果回退到最近有效状态（正常 150 ms 上限
+  外额外容许一个采样周期）并写入报告，连续无效/过期状态、错误、急停和坏包仍会拒绝。最新 episode 实际导出
+  358 帧/35.7 秒，
+  OpenPI 锁定的 LeRobot loader 读回为 image `[3,224,224]`、state `[6]`、10 步
+  action chunk `[10,6]`，全部有限；输出位于本机
+  `/home/tang/Projects/armbot/vla_data/lerobot/armbot_pi05_smoke`。相机 header 到 bag
+  到达延迟 p50 约 303 ms，因此默认按 bag 到达时间因果对齐并把延迟写入转换报告。
+  该 episode 仍为 `unreviewed`，烟雾导出不代表训练放行。
+
+- 2026-08-04：本机 SSH 新增 `Host rdk`，目标为 `sunrise@192.168.3.147`，固定使用
+  `~/.ssh/id_ed25519_rdk_armbot`，并以 `ProxyCommand none` 绕过系统级 SOCKS 代理。
+  `ssh -G rdk` 已确认解析正确；新地址 TCP/22 已可达，在线读取到的 RSA、ECDSA、
+  ED25519 主机指纹与旧地址记录完全一致，确认是同一块 RDK。已安全写入新地址的
+  ED25519 主机键；用户通过 `ssh-copy-id` 恢复公钥授权，`ssh rdk` 已可用。
+- 2026-08-04：Windows 用户 `Tang29Zx` 的 `~/.ssh/config` 也已将 `Host rdk` 更新为
+  `sunrise@192.168.3.147`，继续使用 Windows 独立密钥 `~/.ssh/id_ed25519_rdk`。原
+  `authorized_keys` 文本中虽能搜索到该公钥，但 `ssh-keygen` 无法将其识别为有效行；
+  保留其他有效密钥并强制追加一份格式正确的 Windows 公钥后，Windows OpenSSH
+  `BatchMode` 实测返回 `windows_ssh_ok`。新地址的已核验 ED25519 主机键已写入 Windows
+  `known_hosts`。
+- 2026-08-04：Xbox Wireless Controller `C0:D6:D5:E7:C2:7A` 已在 RDK 配对、信任并
+  连接，受控断开后可重新连接，Linux 会恢复 `/dev/input/js0`。离线修复后原 SDL
+  `ros-humble-joy` 已缺失；直接恢复它会连带升级厂商镜像的 systemd、udev 和 Mesa，
+  因此改用只新增两个 ROS 包且不升级系统组件的 `ros-humble-joy-linux`。独立测试中
+  `joy_linux_node` 成功打开 `/dev/input/js0`，以约 19.65 Hz 发布
+  `sensor_msgs/msg/Joy`，8 个轴、16 个按钮；测试没有启动 controller、teleop 或 I2C。
+  `arm_xbox_control.launch.py` 与 `action_pkg/package.xml` 已切换到 `joy_linux`，RDK
+  安装态软链接和 launch 解析已验证生效。
+- 2026-08-04：RDK 离线修复后 `colcon` 命令缺失，`scripts/build-rdk-ros2.sh` 当前不能
+  重建 workspace；现有 `--symlink-install` 使本轮 launch 修改直接生效，但后续正式
+  构建仍需恢复 `python3-colcon-common-extensions`。该包模拟安装为新增 36 个包、无升级
+  或删除，本轮未扩大安装范围；未解决项记录在 `DEBUG.md`。
+- 2026-08-04：RDK 离线修复后的可观测验收通过：根分区为 `clean`，当前和上次启动
+  无新增 ext4/I/O 错误；`std_msgs`、`sensor_msgs`、`std_srvs` 均为 `ii`，包审计与
+  文件校验无异常。`config/fastdds.xml` 已加入 `PREALLOCATED_WITH_REALLOC` 并把 UDP
+  allowlist 更新为 `192.168.3.147`，板端正式文件与仓库 SHA-256 一致，旧配置备份在
+  RDK `~/.local/state/armbot/config-backups/fastdds-20260804-before-wifi-fix.xml`。
+  1280×720 MJPEG 相机连续约 35 秒发布 `CompressedImage`，实测约 29.88 Hz，无 Fast
+  CDR 崩溃。默认 calibration 文件仍缺失，不阻塞当前图像采集，但不能据此宣称相机
+  已完成几何标定；机械臂实机控制链也仍需独立验收。
+- 2026-08-03：`vla_dataset` 的 8 个包文件和采集规格已同步到 RDK
+  `/home/sunrise/Armbot`，逐文件 SHA-256 与本地一致；README 和
+  `scripts/build-rdk-ros2.sh` 也已同步，后者会随控制包一起构建 recorder。远端只构建
+  `vla_dataset`，结果成功，6 项测试全部通过，安装态 `record_episode --help` 正常。
+  同步和验证期间未启动 controller、teleop、Joy、相机或 rosbag。RDK 已确认
+  `/dev/video0` 支持 MJPEG 1280×720@30 fps，`hobot_usb_cam` 已安装，用户属于
+  `video` 组，根分区剩余约 43 GB；真实带消息 episode 尚未录制。
+- 2026-08-03：用户明确说明当前实机控制链尚未完成最终验收。后续正式数据的 manifest
+  仍应记录实际烧录 HEX SHA-256（可暂记 `unknown`）和 Armbot commit，且不能把当前
+  控制状态描述为已验收。
+- 2026-08-03：RDK 根分区 `/dev/mmcblk1p2` 存在 ext4 元数据损坏：内核记录 inode
+  checksum invalid，`tune2fs` 为 `clean with errors`，错误计数 56；ROS 的
+  `sensor_msgs`/`std_srvs` introspection 库和一个生成的 C 文件校验失败，
+  `std_msgs` 原已 half-installed。官方 4.9.1 临时 overlay 配合 Fast DDS
+  `PREALLOCATED_WITH_REALLOC` 已把 1280×720 MJPEG `/image` 验证到约 29.9 Hz，但
+  正式重装被坏 inode 的 `EUCLEAN` 中断。损坏文件备份在 RDK
+  `~/.local/state/armbot/package-backups/20260803-ros-msg-corruption`；必须先离线
+  `fsck.ext4 -f /dev/mmcblk1p2`，再恢复三个 ROS 包并部署 DDS 配置，修复前暂停正式
+  VLA 采集。
+- 2026-08-03：RDK 当前根盘经 sysfs 确认为可拔出的 SD/TF 卡，根分区是
+  `/dev/mmcblk1p2`。离线 fsck 前的源码与 DDS 配置只读备份位于本机
+  `/home/tang/projects/rdk-recovery-20260803-1808`；排除了 `.git` 和可重建的
+  `ros2_ws/build/install/log`，共 268 个文件、约 7.6 MB。
+- 2026-08-03：该 RDK 镜像的 `/etc/fstab` 未配置根分区，启动后 `/` 已是 rw，
+  `systemd-fsck-root.service` 因条件不满足不会检查根盘；不能依赖普通重启自动修复。
+  对 `/dev/mmcblk1p2` 的安全 fsck 必须在 TF 卡作为非启动盘、未挂载时执行。
+- 2026-08-03：新增独立 `vla_dataset` 被动 episode recorder。固定记录 `/image`、
+  `/joy`、`/arm/command`、`/arm/state`、`/arm/state_filtered`，先原子写入
+  `recording` manifest，Ctrl+C 等待 rosbag2 完成收尾后标记 `unreviewed`，异常则
+  标记 `failed`。本机 ROS 2 Humble 构建和 6 项定向测试通过；真实 rosbag2 烟雾
+  测试生成 sqlite3、`metadata.yaml` 和 manifest，SIGINT 正常退出。测试时没有话题
+  发布者，因此消息数为 0；RDK 相机与控制话题实录仍待完成。
+
+- 2026-08-01：RDK controller 已部署 I2C 同周期快速读重试：只对
+  `EAGAIN/EREMOTEIO` 最多尝试 3 次、间隔 5 ms，`ETIMEDOUT` 不重试；耗尽后
+  仍只计为一次轮询失败，原有连续失败锁止保持不变。RDK 两个 ROS 包
+  构建通过，包内回归为 `113 passed、1 skipped`，控制栈保持停止。覆盖前
+  备份为 `/home/sunrise/Armbot-i2c-read-retry-pre-20260801-021140.tar.gz`，
+  SHA-256 为 `156f5aee6555b528e9de5ee2fc39577a492830817dceaf54b9378f0af2e7df5b`。
+  这不代表内核 `lost arbitration/controller timed out` 根因已修复；STM32 续期修复
+  HEX `32380e4d639b234f93acb7b2dd82ce916dca727411b02b104bde730bb137d1e8`
+  仍待刷写和实机验收。
+
+- 2026-08-01：RDK 已同步 XYZ `ARM_NOT_READY` 错误边沿修复，controller 会在
+  非恢复性固件失败时立即发布 `ERROR/FAILED`；RDK 两个 ROS 包重建成功，包内回归
+  为 `110 passed、1 skipped`。覆盖前备份为
+  `/home/sunrise/Armbot-readiness-fix-pre-20260801-014544.tar.gz`，SHA-256 为
+  `edfee6a8435de3d245a9fef1d649280447252b81d72a16a31b48fd8ba852be06`。
+  STM32 空闲反馈自动重同步修复对应 HEX SHA-256 为
+  `239506e74f6932035c2e5ae04f94c4d32b27c17c18a450ebf7fa994c93f5058f`；后续已刷写，
+  并暴露出增量 IK/确认时间被计入 300 ms watchdog 的边界竞态。续期修复的新 HEX
+  SHA-256 为 `32380e4d639b234f93acb7b2dd82ce916dca727411b02b104bde730bb137d1e8`，
+  尚未刷写和实机验收。
+
+- 2026-08-01：RDK `/home/sunrise/Armbot` 已部署夹爪和腕转 `U/G` 直接舵机流的
+  ROS 接口、controller、teleop、配置与测试；9 个目标文件 checksum 与本地一致，
+  `action_interfaces/action_pkg` 构建成功，安装接口包含模式 8～11，包内回归为
+  `109 passed、1 skipped`。部署前备份为
+  `/home/sunrise/Armbot-direct-servo-pre-20260801-005644.tar.gz`，SHA-256 为
+  `2db83642d011df487be19c7fba7916c054f0e1255bb249593e577e4828c1d761`。部署期间
+  控制栈保持停止；配套 STM32 HEX 尚未刷写，所以该记录不代表实机运动已验收。
+
+- 2026-08-05：用户要求夹爪操作不再依赖摇杆回中；映射已改为有效 RT/LT 输入
+  优先于笛卡尔和腕转输入，模式切换仍先结束上一条流。夹爪接触锁存后会忽略持续
+  按住的闭合输入，使摇杆无需先释放 RT 仍可移动机械臂。用户随后明确要求取消 A
+  初次使能的输入中立安全门；A 现只检查输入新鲜、同步状态与机械臂状态，非零输入
+  会在使能后立即运动，NO_IK/直接舵机拒绝后的自动恢复仍要求输入回中。RDK 源码、
+  测试和文档已同步，隔离回归为
+  `114 passed、1 skipped`；两次部署前备份分别位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-gripper-priority` 和
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-enable-active-input`。
+  部署时控制栈已停止，新逻辑将在下次启动时生效，仍待实机验收。
+
+- 2026-08-05：单栈只读证实手柄完全中立且无 `/arm/command` 时，controller 仍为
+  `MOVING/PHASE_NONE/seq=1113`。根因是未下发队列命令提前覆盖公开生命周期，加上
+  ACK 后缺少终态 watchdog，丢失终态会永久保留活动 wire ID；Reset 又按公开
+  `STATE_MOVING` 阻止恢复。修复后队列不再改写公开状态，活动命令必须在
+  `duration_sec + command_timeout_sec` 内到达终态，否则清空活动/队列并报告
+  `ERR_CMD_TIMEOUT`；孤立 `MOVING` 自动回 `IDLE`，Reset 只阻止真实活动命令。
+  新增 6 个回归，RDK 隔离 Domain 230 完整测试为 `120 passed、1 skipped`；源码、
+  测试和契约已同步，备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-fake-moving-lifecycle`。
+  生产进程尚未重启，实机连续操作验收待完成。
+
+- 2026-08-05：新栈启动后另一种持续 `MOVING` 被证实为真实命令流：未触碰的
+  `joy_linux` 扳机轴启动为 `0.0`，映射将其当作半按，teleop 以约 10 Hz 持续发布
+  `MODE_GRIPPER_SERVO`，固件正常返回 `EXECUTING/error=0`。teleop 已改为分别等待
+  两个扳机首次出现 `+1.0` 释放端点，在此之前将未初始化轴按中立处理；Joy 超时或
+  无效后重新初始化。新增 2 个回归，RDK 隔离完整测试为
+  `122 passed、1 skipped`。源码、测试和文档已同步，备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-trigger-init`；当前旧进程
+  尚未重启，待安全重启及实机确认。
+
+- 2026-08-05：扳机修复重启后，`F/wire_id=185` 在 3 秒时被主机终态 watchdog
+  提前报 `0x0016`，固件约 4.8 秒后才正常 `COMPLETED`，期间下一条 T 被拒绝为
+  `ARM_NOT_READY`；当前 `wire_id=367` 再现同一签名。根因是 F/G 无 duration，
+  主机误用 0+3 秒，而固件允许最长 30 秒运动收敛。controller 已改为 F/G 使用
+  `max_duration_sec + command_timeout_sec`，普通命令仍维持 duration 加 ACK 余量；
+  新增失败回归，RDK 隔离完整测试为 `123 passed、1 skipped`。controller、测试和
+  契约已同步，备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-stream-end-terminal-window`；
+  17:19 已重启单栈并完成受控实机验收：启动扳机均为 `0.0` 时静置无假命令；Home
+  成功；`T3～7 → F8` 与快速恢复输入 `T9 → F10 → T11 → F12` 均按序完成，两个
+  F 分别约 0.387/0.405 秒到达 `COMPLETED/error=0`。最终
+  `SUCCEEDED/COMPLETED/seq=12/position_valid=true`、teleop disabled，静置 5 秒无
+  `/arm/command`。测试中一次误用禁用的 MODE_JOINT 被安全拒绝、无硬件运动并已
+  Reset，不属于产品复现错误。
+
+- 2026-08-05：用户 17:27 重启单栈后第一条 `seq=1/wire_id=1` 被固件拒绝为
+  `ARM_NOT_READY`，同时 I2C/反馈正常且 Joy 无命令。根因是 real teleop 过去只凭
+  三帧关节接近 Home 就在进程启动时自动同步，物理姿态却不能证明 STM32 规划器
+  ready。已移除实机启动自动同步；每次启动必须显式 Home，并且只有匹配完成、有效
+  反馈及 Home 容差内连续三帧同时满足才允许 A。输入中立门仍保持取消。旧行为失败
+  回归与修复后完整测试已完成，RDK 隔离结果 `123 passed、1 skipped`。源码、测试和
+  文档已部署，备份为
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-explicit-home-on-start`；部署时
+  控制栈为空，`action_pkg` 已重建且安装层与源码哈希一致。未自动启动，待显式 Home
+  流程实机验收。
+
+- 2026-08-05：显式 Home 现场 `seq=602` 已完成，但关节反馈约 4 分钟后才稳定进入
+  Home 容差；等待期间 A 错误显示 `run home first`。teleop 已将 Home/reset pending
+  提示前置，并为固件完成后的姿态验证增加 `3 s` 期限；超时会记录实际/期望关节角、
+  保持 unsynced、结束静默等待并允许再次显式 Home，不会放宽反馈安全门。修复已部署
+  并重建，RDK 完整测试为 `125 passed、1 skipped`，备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-home-feedback-verification`；
+  当时运行中的 PID 29741 仍是旧内存代码，需重启控制栈后生效。
+
+- 2026-08-05：首次两次 Home 的 elbow 误差为 `5.04 deg`，仅越过原 `5.00 deg`
+  阈值 `0.04 deg`，小于约 `0.24 deg/raw tick` 的反馈量化。Home 容差已放大为
+  `5.25 deg` 并部署，完整测试 `126 passed、1 skipped`，备份为
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-home-tolerance-5p25`。同一现场
+  后续确有一次固件 v3 包无效后回到 `READY/wire_id=0` 的独立重启事件；这种事件仍
+  必须显式 Reset，不能自动清错。部署时 PID 33642 仍加载旧 `5.00 deg`，需重启生效。
+
+- 2026-08-05：夹爪流出现 26 次连续 `STREAM_STEP_TOO_LARGE` 后进入流超时，随后
+  `G(gripper)` 33 秒无终态。controller 同轮询下发排队 END 覆盖了公开失败沿，
+  teleop 未能暂停并继续累计目标。修复以最后匹配 `PHASE_EXECUTING` 的直接目标
+  为基线，把夹爪和腕转候选限制在 `9 deg`，并在 END 下发前显式发布拒绝快照；直接
+  拒绝会回滚、只结束一次流并等待输入回中。新增 4 个回归，RDK 正式源码完整测试
+  `130 passed、1 skipped`，代码、配置、测试与文档已部署；备份位于
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-direct-stream-confirmed-step`。
+  生产 PID 35877/35889/35891 未重启，仍需用户重启后完成实机验收。
+
+- 2026-08-05：用户重启确认限步参数生效后，所有夹爪 `U` 均正常
+  `EXECUTING/error=0`，但 `G(gripper) seq=277/wire_id=161` 33 秒无终态，使后续
+  机械臂命令被跨模式队列阻塞并最终报 `0x0016`。Joy 中立且同期无内核 I2C 错误。
+  Xbox 夹爪松开/切换/拒绝现改用有界 `MODE_GRIPPER_STOP/H`，controller 同时清除
+  gripper stream 并等待 H 完成后放行机械臂；腕转仍保留 G。新增直接
+  `U → H → A` 回归，RDK 正式源码完整测试 `131 passed、1 skipped`，备份为
+  `/home/sunrise/.local/state/armbot/deploy-backups/20260805-gripper-halt-end`。生产 PID
+  47737/47749/47751 未重启，待用户重启后实机验收。
+
+- 2026-07-31：RDK `/home/sunrise/Armbot` 已部署 VLA-only 的 3 点因果中值加
+  One Euro 状态滤波，以及 Xbox `0.30 s` 流 watchdog。One Euro 默认参数为
+  `min_cutoff=1.0 Hz`、`beta=1.5`、导数截止 `1.0 Hz`、时间重置间隔 `0.5 s`；
+  `/arm/state` 和控制安全链保持未滤波。同步的 9 个文件与本地 SHA-256 一致，
+  RDK 构建通过，完整 pytest 为 `105 passed、1 skipped`，控制栈保持停止。覆盖前
+  备份位于 `/home/sunrise/Armbot-one-euro-pre-20260731-232948.tar.gz`，SHA-256
+  为 `9a27350dc7e2df981007996dd941ad0262c4d426798fcaa55545b2f740591b4a`。
+  该记录只证明部署和离线回归，不代表真实 rosbag 延迟或 VLA 采集质量已验收。
+
+- 2026-07-17：RDK 单控制栈下 Home/相关命令能进入固件 v3 `EXECUTING`，但随后
+  多次返回 `SERVO_FEEDBACK_FAILED (error=6)`；六路 raw 多次全部为 `0`，
+  `position_valid=false`。此前已验收关闭的“机械臂舵机无有效反馈”问题因此重新
+  打开。RDK 启动早期另有 24 次 `Errno 121`，随后 I2C 能恢复并读取合法 v3 状态，
+  所以当前 Home 的直接阻塞是 USART2 舵机反馈而不是 v2/v3 协议不匹配。Windows
+  桌面源码与当前工作树关键文件哈希一致，但本次受限 Keil 构建没有生成 AXF/HEX，
+  板上 v3 镜像的确切源码快照仍无法由构建产物证明；确认前停止反复 Reset/Home。
+
+- 2026-07-17：已把 I2C v3 滚动伺服对应的 ROS 消息、controller、teleop、探针、
+  配置和测试迁移到 RDK `/home/sunrise/Armbot`，保留并核对了既有取消 XYZ 限位的
+  `teleop_mapping.py`。迁移前 10 个目标文件备份为
+  `/home/sunrise/Armbot-qgoal-v3-pre-migration-20260717.tar.gz`，SHA-256 为
+  `bee945bed8e8456b96a1aa768aa17a151653948e4e14fd81ffa8830825997eea`。
+  RDK 隔离构建通过，测试为 `80 passed、1 skipped`；迁移时确认 controller、
+  teleop、launch 和 joy 进程均未运行，也未启动控制栈。STM32 v3 尚未配套刷写，
+  因此当前不得启动普通运动；版本不匹配会拒绝普通命令，跨版本全局 STOP 仍可用。
+
+- 2026-07-17：ROS controller 已实现 I2C v3 和 `ArmState.command_phase`。流式 T
+  必须收到匹配 `EXECUTING` 才发送下一目标；队列独立保存最新 T 与 END，Teleop
+  在摇杆回中或 A 正常暂停时发送一次 END，Joy/ArmState 异常超时不发送 END。
+  最后可达目标按匹配 `PHASE_EXECUTING` 记录，NO_IK/跨度拒绝回退时不会使用尚未
+  安装的请求坐标。首轮速度固定为 `0.5 cm/s、5 deg/s`，watchdog 为 `0.20 s`。
+  `action_interfaces/action_pkg` 构建通过，controller/teleop/mapping 定向回归
+  `78 passed`；完整 `colcon test` 汇总为 `85 tests、0 errors、0 failures、
+  1 skipped`。尚未部署 RDK，也未实机验收。
+
+- 2026-07-16：RDK 再次启动第二套 `arm_xbox_control.launch.py` 后，两个同名
+  controller/teleop/joy 节点同时存在，`/arm/state` 与 `/arm/command` 各有两个
+  发布者/订阅者，两个 controller 竞争 I2C，实测引发 `Errno 121`、I2C 锁存错误、
+  重复 sequence 和命令确认超时。单次 `/arm/state` 的成功消息不能代表整套系统
+  健康。用户授权后已停止全部 launch 并清理遗留子进程，精确进程检查和 ROS 图均
+  确认无机械臂控制节点；当前保持完全停止，后续只能启动一套。
+- 2026-07-16：RDK 已部署取消 XYZ 遥操限位、pitch `[-90,90] deg` 的版本。
+  部署前停止 enabled 遥操并发送全局 STOP；新栈启动后遥控为 disabled，机械臂
+  `IDLE/position_valid/error_code=0`。运行参数已无 XYZ 限位，RDK 已安装映射的
+  离线验证可从旧边界 `(20,10,25)` 继续累计到 `(21,11,26)`；尚待用户实机运动验收。
+- 2026-07-16：RDK 已继续部署 `NO_IK_SOLUTION` 非锁存恢复：控制器发布
+  `STATE_IDLE/error_code=0x0020`，遥操回退最后成功笛卡尔目标并等待输入回中后
+  自动恢复。部署前后均为遥控 disabled、机械臂 IDLE、反馈有效且无错误；本地
+  action_pkg 回归 72 passed、1 skip，尚待用户在可达域边缘做实机动态验收。
+- 2026-07-15：用户曾实机确认 Xbox 遥控抖动已缓解；随后将笛卡尔遥操从原始速度
+  提高到 `2×` 后再次报告抖动，原问题已从 `DEBUG_CLOSED.md` 移回 `DEBUG.md`。
+  当前 10 Hz/90 ms 不变，满幅平移单步由 `0.1 cm` 增至 `0.2 cm`；输入低通只能
+  缓和起停/变向或真实 Joy 噪声，不能消除恒定输入下的离散短轨迹节拍。舵机反馈
+  问题仍保持用户已验收关闭。
+- 2026-07-15：用户确认当前配套版本由两个仓库的最新提交共同组成：Armbot
+  `29117917dc46bb0de31511a59b5e45628ff9dc1d` 与 armbot-stm32
+  `6cd94ea57c5b68c0920bf8c3a1be24cb2325b936`。两个 SHA 属于不同仓库，版本发布和
+  烧录记录必须成对保存；该映射本身不能证明运行中的 STM32 已烧录对应二进制。
+- 2026-07-15：STM32 的 `LeArm.lib` 中 `ikine()` 固定使用负平方根肘部分支；
+  `set_pitch_range()` 以 `1 deg` 步长返回第一个可行俯仰解，
+  `robot_arm_coordinate_set()` 选解时不参考上一帧关节状态。RDK 只读实机采样证明，
+  单调连续的遥控坐标会约每 5～6 个控制周期触发一次搜索俯仰角的 `1 deg` 阶跃，
+  造成约 `1.9～2.1 deg` 的多关节目标跳变和对应肩关节反馈锯齿；这是当前移动抖动
+  的直接原因，10 Hz/90 ms 微轨迹的停走节拍会进一步放大冲击。
+- 2026-07-15：连续 IK 修复保持固定肘型和 I2C v2 不变，使用 `1 deg` 粗搜索加
+  `0.05 deg` 边界二分，并依据上一条成功命令的四关节角选择连续候选。
+  `1 deg + 120 deg/s * duration` 只作为候选优先线；用户明确选择全部候选超线时
+  仍执行最大关节变化最小的解。离线实测轨迹模型把最大相邻关节变化从
+  `2.121 deg` 降到 `0.486 deg`，Keil ARMCC 5.06 全量链接为 0 errors；后续用户
+  实机确认抖动已缓解并接受当前效果。
+- 2026-07-14：用户已实机验收 Home 后实际 y 回到机械中线，原“Home 后实际 y
+  未归零”问题已关闭；当前 Home 和开机复位的底座目标均为舵机 6 `raw 500`。
+- 2026-07-14：单控制栈 rosbag 证明，RT 闭合后左摇杆期间 ROS 只发布 A 命令、没有
+  发布打开用的 P 命令，但舵机 1 仍从约 `raw 693` 回到约 `raw 231`。直接根因是
+  开机 reset 给 1 号保存了 `raw≈226/2000 ms` 的 `MOVE_TIME_WAIT_WRITE`；后续 A
+  只更新 6～3 号却广播 `MOVE_START`，从而重放 1 号残留的 reset-open 目标。ARM
+  批次必须只 START 本次预写的 6、5、4、3 号；广播 START 只能用于明确覆盖了全部
+  相关舵机 WAIT 目标的批次。
+- 2026-07-14：独立只读固件对舵机 1～6 连续读取完整 9 字节，均为
+  `00 55 55 ID 05 1C posL posH checksum`，解析结果
+  `rx=OK/uart=0x00/skip=1/checksum valid`。舵机断电时每次请求仍收到单独的
+  `0x00`，证明它来自板端半双工收发切换路径，而不是舵机回包。生产解析器遇到
+  帧头前非 `0x55` 字节就立即失败，是当前全部反馈无效的直接软件根因；修复应在
+  有界窗口内搜索帧头并校验完整帧。
+- 2026-07-14 17:25：RDK 部署 v2 后，Home `wire_id=1` 从 `EXECUTING` 进入
+  `FAILED/SERVO_FEEDBACK_FAILED`；ROS 映射为 `error_code=0x0024`，保持
+  `position_valid=false` 和 `/arm/teleop_enabled=false`，没有把无反馈 Home
+  误报为成功。状态包中的舵机 1～6 raw 当时全部为 `0`，具体失败舵机及反馈接收
+  根因仍待确认。
+- 2026-07-14：RDK 实机证明旧版显式回零恢复存在安全缺口：固件持续返回旧
+  `ARM_DONE` 且舵机 2～6 反馈为 `0`、`position_valid=false` 时，控制器仍会按
+  命令时长将 Home 标记成功并允许 A 启用遥控。该行为不能作为回零验收依据，
+  后续实现必须同时验证匹配命令完成与有效位置反馈。
+- 2026-07-13：`action_interfaces`、`action_pkg` 可完成隔离构建；Xbox 遥控与
+  控制器相关 `colcon test` 共 48 项，0 failures、0 errors、1 个仓库原有
+  copyright skip。
+- 2026-07-13：Shadow launch 已实际启动并发布模拟 Joy；节点只订阅
+  `/joy_sim`，只发布 `/arm/teleop_command`、Shadow 急停和使能状态。左摇杆
+  向上首个 10 Hz 控制周期产生 `x≈15.10 cm`、`sequence_id=1`，未连接 I2C。
+- 2026-07-13：开发电脑运行 WSL2 mirrored networking，RDK X5 有线地址 `192.168.127.10`，WSL 有线镜像地址 `192.168.127.100`；两端 ping 和 SSH 端口可达。
+- 2026-07-13：PC 与 RDK 的 ROS 2 Humble 统一使用 Domain 29、`rmw_fastrtps_cpp` 和有线网卡白名单；Fast DDS 配置分别位于 PC/RDK 的 `~/.config/armbot/fastdds.xml`，并由 `.bashrc` 的 `FASTRTPS_DEFAULT_PROFILES_FILE` 加载。
+- 2026-07-13：Domain 29 的 Fast DDS UDP 端口范围为 `14650:14899`。WSL Hyper-V 防火墙通过 `ROS2-DDS-RDK` 仅允许 RDK `192.168.127.10` 入站；RDK UFW 也必须在 `eth0` 上允许 PC `192.168.127.100` 访问该 UDP 范围。配置后已用临时 topic 双向验证成功。
+- 2026-07-13：RDK 的 Fast DDS 自定义传输必须同时保留 UDP allowlist 中的 loopback `127.0.0.1`、有线地址 `192.168.127.10`，并启用 SHM；只有 eth0 UDP 时，RDK 本机 ROS 进程无法发现同机发布者。修复后已验证 RDK 本机和 WSL 均能接收 RDK `joy_node` 发布的 `/joy`。
+- 2026-07-13：RDK 已安装 `ros-humble-joy`，`sunrise` 已加入 `input` 用户组；Xbox 控制器可由 SDL 枚举并通过 `sensor_msgs/msg/Joy` 发布。运行 `joy_node` 前需确认当前登录会话的 `id` 包含 `input`。
+- 2026-07-13：RDK 的 `/usr/local` 中 `setuptools 80.9.0` 会覆盖 Ubuntu 系统版
+  `59.6.0`，导致 ROS 2 Humble 的 `colcon --symlink-install` 报
+  `option --editable not recognized`。优先运行 `bash scripts/build-rdk-ros2.sh`；
+  手工构建时需在 source ROS 后设置
+  `PYTHONPATH=/usr/lib/python3/dist-packages:${PYTHONPATH}`。若曾切换安装模式，
+  只清理目标包对应的 `build/<package>` 与 `install/<package>` 后重建。
+- 2026-07-13：RDK 使用独立 SSH 密钥 `~/.ssh/id_ed25519_rdk_armbot`；私钥只保存在本机，不进入仓库或项目记忆。

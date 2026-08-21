@@ -24,15 +24,17 @@ NO_SOLVE，节点会停在 STATE_ERROR 且固件状态字符串卡在 'NO_SOLVE'
 连续 NO_SOLVE 会被吞掉、误判为 TIMEOUT。STOP 让固件回到 STOP_OK_，
 下一个点的 NO_SOLVE 才是一次真实跳变，可被正确识别。
 """
+from action_interfaces.msg import ArmCommand, ArmState
 import rclpy
 from rclpy.node import Node
-from action_interfaces.msg import ArmCommand, ArmState
 
 ERR_FW_NO_SOLVE = 0x0020
 ERR_CMD_TIMEOUT = 0x0016
 
 
 class IKProbe(Node):
+    """Probe the firmware IK workspace through ROS 2 commands."""
+
     def __init__(self):
         super().__init__('ik_probe')
         self.cmd_pub = self.create_publisher(ArmCommand, '/arm/command', 10)
