@@ -91,7 +91,7 @@ checkpoints/
 #=========================
 src/HybrIK/
 HybrIK/
-src/m-explore-ros2/
+ros2_ws/src/m-explore-ros2/
 
 #=========================
 #Codex
