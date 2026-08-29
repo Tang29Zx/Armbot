@@ -19,7 +19,7 @@ MAP_QOS = QoSProfile(depth=10, history=HistoryPolicy.KEEP_LAST,
                      durability=DurabilityPolicy.TRANSIENT_LOCAL)
 
 LOCK_MAP, LOCK_ODOM, LOCK_CMD = threading.Lock(), threading.Lock(), threading.Lock()
-MAP, ODOM, CMD = None, {"x": 0, "y": 0, "theta": 0}, {"x": 0.0, "y": 0.0, "z": 0.0, "t": 0.0}
+MAP, MAP_STATIC, ODOM, CMD = None, None, {"x": 0, "y": 0, "theta": 0}, {"x": 0.0, "y": 0.0, "z": 0.0, "t": 0.0}
 NODE = None
 MAPPING_LOCK = threading.Lock()
 MAPPING_LAST = [0.0]  # 上次触发开始建图的时间（防重复）
@@ -36,6 +36,9 @@ class RosNode(Node):
         super().__init__("armbot_web")
         # /map: map_server 发布（TRANSIENT_LOCAL），须 TRANSIENT_LOCAL 订阅
         self.create_subscription(OccupancyGrid, "/map", self.cb_map, MAP_QOS)
+        # 8-29 15:18: 导航模式下 /map 会被 slam 定位节点的局部图(尺寸可变)抢占/覆盖静态图
+        # → 额外订阅 map_relay 转发的 /map_static（map_server 完整静态图），前端优先显示它
+        self.create_subscription(OccupancyGrid, "/map_static", self.cb_map_static, MAP_QOS)
         self.create_subscription(Odometry, "/odom", self.cb_odom, 10)
         self.pub = self.create_publisher(Twist, "/cmd_vel", 10)
         self.nav_client = ActionClient(self, NavigateToPose, "navigate_to_pose")
@@ -66,6 +69,18 @@ class RosNode(Node):
             MAP = {"w": w, "h": h, "res": msg.info.resolution,
                    "ox": msg.info.origin.position.x, "oy": msg.info.origin.position.y,
                    "step": step, "data": data, "data_full": data_full}
+
+    def cb_map_static(self, msg):
+        """/map_static：map_relay 转发的 map_server 完整静态图（导航模式优先显示）"""
+        global MAP_STATIC
+        w, h = msg.info.width, msg.info.height
+        step = max(1, math.ceil(w / 240))
+        data = [[msg.data[j * w + i] for i in range(0, w, step)] for j in range(0, h, step)]
+        data_full = [[msg.data[j * w + i] for i in range(w)] for j in range(h)]
+        with LOCK_MAP:
+            MAP_STATIC = {"w": w, "h": h, "res": msg.info.resolution,
+                          "ox": msg.info.origin.position.x, "oy": msg.info.origin.position.y,
+                          "step": step, "data": data, "data_full": data_full}
 
     def cb_odom(self, msg):
         global ODOM, POSE_REF
@@ -186,10 +201,12 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
     def do_GET(self):
-        global MAP
+        global MAP, MAP_STATIC
         if self.path == "/api/map" or self.path.startswith("/api/map?"):
             with LOCK_MAP:
-                body = json.dumps(MAP if MAP else {})
+                # 导航模式优先显示 map_server 静态完整图；建图模式无 MAP_STATIC 用 slam 图
+                cur = MAP_STATIC if MAP_STATIC else MAP
+                body = json.dumps(cur if cur else {})
             self._send(body, "application/json")
         elif self.path.startswith("/api/odom"):
             with LOCK_ODOM:
@@ -255,6 +272,7 @@ class Handler(BaseHTTPRequestHandler):
                     # 8-29: 清空 Web 地图缓存，等待新 slam 出图（否则旧图不释放）
                     with LOCK_MAP:
                         MAP = None
+                        MAP_STATIC = None
                     # RDK 重启后 /tmp/explore_run 不存在，先建目录再写日志
                     os.makedirs("/tmp/explore_run", exist_ok=True)
                     logf = open("/tmp/explore_run/start_mapping_web.log", "a")
@@ -379,7 +397,7 @@ td{padding:2px 8px;color:#aaa}
 </head>
 <body>
 <div id="topbar">
-  <b style="font-size:14px">Armbot <span class="ver">v8-29-1505</span></b>
+  <b style="font-size:14px">Armbot <span class="ver">v8-29-1518</span></b>
   <select id="mapSel" style="background:#222;color:#eee;border:1px solid #555;border-radius:3px;padding:3px 6px;font-size:12px"></select>
   <button id="btnNav" onclick="startNav(); this.blur();" style="background:#38c">启动导航</button>
   <button id="btnMap" onclick="startMapping(); this.blur();" style="background:#38c">重新建图</button>
