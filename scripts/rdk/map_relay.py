@@ -1,37 +1,60 @@
 #!/usr/bin/env python3
-"""map_relay: 订阅 /map，只把 map_server 的完整静态图转发到 /map_static。
-slam localization 会持续发布局部图到 /map（尺寸可能比静态图还大，如 map_save 230x98
-vs slam 局部 283x157）——"更大图"过滤会选错。改为：启动延迟 2s（等 map_server 激活
-发布 latched 图）后，只转发收到的第一张图并锁定，之后全部忽略。
+"""map_relay: 从 map_server 的 GetMap service 取完整静态图，发布到 /map_static。
+背景：/map 有 2 个发布者（map_server 完整图 + slam_toolbox 局部图，publish_map:false
+不生效），订阅 /map 会被 slam 高频局部图淹没，永远等不到完整图（曾导致 global
+costmap 被缩成 147x31 小窗、远处目标无法规划）。
+方案：改用 service（/map_server/map, nav_msgs/srv/GetMap）一次性取图——
+不订阅话题，无竞争，绝对可靠。发布 /map_static（TRANSIENT_LOCAL latched）
+供 costmap 静态层 + Web 使用。
 """
 import time
 import rclpy
 from rclpy.node import Node
 from nav_msgs.msg import OccupancyGrid
+from nav_msgs.srv import GetMap
 
-# TRANSIENT_LOCAL：map_server 的 /map 是 latched，新订阅者能收到
-MAP_QOS = rclpy.qos.QoSProfile(depth=1, durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL)
+MAP_QOS = rclpy.qos.QoSProfile(
+    depth=1,
+    reliability=rclpy.qos.ReliabilityPolicy.RELIABLE,
+    durability=rclpy.qos.DurabilityPolicy.TRANSIENT_LOCAL,
+)
+SERVICE_NAME = '/map_server/map'
+
 
 class MapRelay(Node):
     def __init__(self):
         super().__init__('map_relay')
         self.pub = self.create_publisher(OccupancyGrid, '/map_static', MAP_QOS)
-        self.sub = self.create_subscription(OccupancyGrid, '/map', self.cb, MAP_QOS)
-        self.locked = False
-        self.n = 0
-        self.t0 = time.time()
+        self.cli = self.create_client(GetMap, SERVICE_NAME)
+        self.done = False
+        self.retry_at = time.time() + 5.0   # 等 map_server lifecycle active
+        self.create_timer(1.0, self.tick)
 
-    def cb(self, msg):
-        # 启动 2s 内不接收（等 map_server 激活；slam 有 6s TimerAction 延迟，先到的一定是 map_server 的图）
-        if time.time() - self.t0 < 2.0:
+    def tick(self):
+        if self.done or time.time() < self.retry_at:
             return
-        if self.locked:
-            return  # 已锁定 map_server 完整图，slam 局部图一律忽略
-        w, h = msg.info.width, msg.info.height
-        self.locked = True
-        self.pub.publish(msg)
-        self.n += 1
-        print(f'[map_relay] 锁定并转发 {w}x{h}（第{self.n}次）', flush=True)
+        if not self.cli.wait_for_service(timeout_sec=0.5):
+            print('[map_relay] 等待 %s 可用...' % SERVICE_NAME, flush=True)
+            self.retry_at = time.time() + 3.0
+            return
+        print('[map_relay] 调用 GetMap service...', flush=True)
+        fut = self.cli.call_async(GetMap.Request())
+        fut.add_done_callback(self.got)
+        self.retry_at = time.time() + 3600   # 防止重复调用
+
+    def got(self, fut):
+        try:
+            m = fut.result().map
+            w, h = m.info.width, m.info.height
+            if w * h == 0:
+                raise ValueError('空地图')
+            self.pub.publish(m)
+            self.done = True
+            print('[map_relay] 已发布完整图 %dx%d 到 /map_static' % (w, h), flush=True)
+        except Exception as e:
+            print('[map_relay] GetMap 失败: %s（重试）' % e, flush=True)
+            self.retry_at = time.time() + 3.0
+
 
 def main():
     rclpy.init()
@@ -41,6 +64,7 @@ def main():
     except KeyboardInterrupt:
         pass
     rclpy.shutdown()
+
 
 if __name__ == '__main__':
     main()
