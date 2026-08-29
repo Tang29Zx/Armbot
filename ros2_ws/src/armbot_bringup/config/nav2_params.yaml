@@ -101,7 +101,7 @@ controller_server:
       min_vel_y: -0.15
       max_vel_x: 0.15
       max_vel_y: 0.15
-      max_vel_theta: 0.4
+      max_vel_theta: 0.6    # 8-29 18:00: 0.4→0.6（旋转更快，目标在后方时转弯更果断）
       min_speed_xy: 0.0
       max_speed_xy: 0.25
       min_speed_theta: 0.0
@@ -113,8 +113,8 @@ controller_server:
       decel_lim_theta: -1.5
       vx_samples: 8
       vy_samples: 8                 # mecanum 横移采样
-      vtheta_samples: 6    # 8-22 16:17: 降采样防 controller 掉帧
-      sim_time: 1.0    # 8-22 16:17: 轨迹前瞻缩短防掉帧
+      vtheta_samples: 8   # 8-29 18:00: 6→8（旋转采样更细）
+      sim_time: 1.5    # 8-29 18:00: 1.0→1.5（轨迹仿真更充分，旋转轨迹 1.5s 转 39-52° 得分优势明显）
       linear_granularity: 0.05
       angular_granularity: 0.025
       transform_tolerance: 0.2
@@ -142,8 +142,8 @@ controller_server:
       GoalAlign.forward_point_distance: 0.325
       GoalDist.scale: 12.0
       PathAlign.scale: 30.0     # 增强车头对齐路径：目标在后方时先原地转头再走
-      PathDist.scale: 16.0
-      PreferForward.scale: 0.1
+      PathDist.scale: 12.0    # 8-29 18:00: 16→12（旋转轨迹 PathDist 劣势减小，促进转弯）
+      PreferForward.scale: 0.0    # 8-29 18:00: 0.1→0（消除前进偏好，避免"目标在后方仍选前进"）
 
 # =============================================================================
 # Planner Server
@@ -207,7 +207,6 @@ bt_navigator:
     robot_base_frame: base_link
     odom_topic: /odom
     bt_loop_duration: 10
-    default_bt_xml_filename: navigate_w_replanning_only_if_goal_is_updated.xml
     default_server_timeout: 20
     wait_for_service_timeout: 1000
 
@@ -216,12 +215,15 @@ bt_navigator:
     # nav2_follow_path_action_bt_node, nav2_spin_action_bt_node,
     # nav2_wait_action_bt_node, nav2_back_up_action_bt_node,
     # nav2_assisted_teleop_action_bt_node
-    default_bt_xml_filename: "navigate_to_pose_w_replanning_and_recovery.xml"
+    # 8-29 18:00: navigate_to_pose_w_replanning_and_recovery.xml 每 1Hz 周期重规划，
+    # 路径起点随车前移 → DWB 永远"追起点"不转弯。改用"路径失效才重规划 + 带 recovery"的树。
+    default_bt_xml_filename: "navigate_w_recovery_and_replanning_only_if_path_becomes_invalid.xml"
     plugin_lib_names:
       - nav2_compute_path_to_pose_action_bt_node
       - nav2_compute_path_through_poses_action_bt_node
       - nav2_clear_costmap_service_bt_node
       - nav2_goal_updated_condition_bt_node
+      - nav2_is_path_valid_condition_bt_node    # 8-29 18:00: 新 BT (replan only if path invalid) 需要
       - nav2_follow_path_action_bt_node
       - nav2_spin_action_bt_node
       - nav2_wait_action_bt_node

@@ -76,8 +76,9 @@ def generate_launch_description():
     )
 
     # ── Scan filter：滤 <0.8m 车体/支架/无效点（防 costmap 障碍环 + 保留 0.8-1m 定位特征）──
+    # 8-29: 路径用 ~/（RDK 重启后 /tmp 被清空导致脚本缺失崩溃）
     scan_filter_node = ExecuteProcess(
-        cmd=['python3', '/tmp/scan_filter.py'],
+        cmd=['python3', '/home/sunrise/scan_filter.py'],
         output='screen',
         condition=IfCondition(LaunchConfiguration('use_lidar')),
     )
@@ -93,6 +94,10 @@ def generate_launch_description():
     )
 
     # ── Map Server ──
+    # 8-29 17:20: map_server 输出 remap 到 /map_server_map——
+    # /map 同时有 map_server + slam_toolbox(局部图, publish_map:false 不生效) 两个发布者，
+    # slam 订阅 /map 拿初始地图会被自己发布的局部图干扰 → 定位无全局地图约束 → 乱漂。
+    # remap 后 slam 订阅 /map_server_map 拿到干净的 latched 完整图。
     map_server_node = Node(
         package='nav2_map_server',
         executable='map_server',
@@ -101,16 +106,19 @@ def generate_launch_description():
         parameters=[nav2_params, {
             'yaml_filename': LaunchConfiguration('map'),
         }],
+        remappings=[('/map', '/map_server_map')],
     )
 
     # ── Map Relay：只把 map_server 完整图转发到 /map_static（costmap 静态层用）──
+    # 8-29: 路径用 ~/（RDK 重启后 /tmp 被清空导致脚本缺失崩溃）
     map_relay_node = ExecuteProcess(
-        cmd=['python3', '/tmp/map_relay.py'],
+        cmd=['python3', '/home/sunrise/map_relay.py'],
         output='screen',
     )
 
     # ── SLAM Toolbox (localization mode) ──
-    # 不传 map_file_name（.yaml 会崩）；从 map_server 的 /map 订阅初始地图
+    # 8-29 17:20: map 订阅 remap 到 /map_server_map（拿 map_server 干净完整图作初始地图），
+    # 不再用 /map（被自身局部图发布干扰）。map_file_name 期望 posegraph 序列化文件非 yaml，不可用。
     localize_node = Node(
         package='slam_toolbox',
         executable='localization_slam_toolbox_node',
@@ -118,6 +126,7 @@ def generate_launch_description():
         output='screen',
         condition=IfCondition(LaunchConfiguration('use_lidar')),
         parameters=[local_params],
+        remappings=[('/map', '/map_server_map')],
     )
 
     # ── 静态 map->odom（use_lidar=false 时替代 slam 定位，纯里程计导航）──
