@@ -397,7 +397,7 @@ td{padding:2px 8px;color:#aaa}
 </head>
 <body>
 <div id="topbar">
-  <b style="font-size:14px">Armbot <span class="ver">v8-29-1556</span></b>
+  <b style="font-size:14px">Armbot <span class="ver">v8-29-1603</span></b>
   <select id="mapSel" style="background:#222;color:#eee;border:1px solid #555;border-radius:3px;padding:3px 6px;font-size:12px"></select>
   <button id="btnNav" onclick="startNav(); this.blur();" style="background:#38c">启动导航</button>
   <button id="btnMap" onclick="startMapping(); this.blur();" style="background:#38c">重新建图</button>
@@ -456,9 +456,10 @@ function loadMaps(){
       o.value = m; o.textContent = m;
       sel.appendChild(o);
     });
-    // 8-29 15:56: 默认选中 map_save（若存在），否则第一个；并记忆上次选择
+    // 8-29 16:03: map_save 强制优先（最新保存的地图）；localStorage 记忆仅在其他图时兜底
     var last = localStorage.getItem("armbotMap") || "";
-    var prefer = d.maps.indexOf(last) >= 0 ? last : (d.maps.indexOf("map_save") >= 0 ? "map_save" : d.maps[0]);
+    var prefer = d.maps.indexOf("map_save") >= 0 ? "map_save"
+               : (d.maps.indexOf(last) >= 0 ? last : d.maps[0]);
     sel.value = prefer;
     // 选择变化时记忆
     sel.onchange = function(){ try{ localStorage.setItem("armbotMap", sel.value); }catch(e){} };
