@@ -84,10 +84,10 @@ def generate_launch_description():
 
     # ── static tf base_link -> laser（底盘单独启动后没有 robot_state_pub，需手动发布）──
     # 数值来自 URDF: base_lidar_joint(0.175,0,0.15) + laser_joint(0,0,0.03) = (0.175,0,0.18)
-    # 8-29: 雷达 0° 标记朝车尾，yaw 补 180°(3.14159)；注意 static_transform_publisher 参数顺序为 x y z yaw pitch roll
+    # 8-29: 曾误判雷达装反加 yaw=π，实测车头指示反向，撤销恢复 yaw=0（参数顺序 x y z yaw pitch roll）
     static_laser_tf = ExecuteProcess(
         cmd=['ros2', 'run', 'tf2_ros', 'static_transform_publisher',
-             '0.175', '0', '0.18', '3.14159', '0', '0', 'base_link', 'laser'],
+             '0.175', '0', '0.18', '0', '0', '0', 'base_link', 'laser'],
         output='screen',
         condition=IfCondition(LaunchConfiguration('use_lidar')),
     )
