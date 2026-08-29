@@ -294,8 +294,9 @@ class Handler(BaseHTTPRequestHandler):
             w, h, res = m["w"], m["h"], m["res"]
             ox, oy = m["ox"], m["oy"]
             raw = bytearray()
-            # 8-29: PGM 行序反转——map_server 加载 PGM 会垂直翻转（PGM顶部→地图底部），
-            # 故世界底部(j=0)必须写在 PGM 底部（最后一行），否则导航加载后地图上下颠倒
+            # 8-29 16:50 最终确认（map_check 实测）：
+            # nav2_map_server 加载 PGM 会翻转行（Occ[r] = PGM[h-1-r]，PGM 顶部 → 世界顶部）。
+            # 保存时 PGM row0 必须写世界顶部（data_full row h-1）→ for j in range(h-1,-1,-1)。
             for j in range(h - 1, -1, -1):    # 世界顶部先写（PGM 顶部），世界底部最后
                 row = m["data_full"][j]
                 for i in range(w):
@@ -397,7 +398,7 @@ td{padding:2px 8px;color:#aaa}
 </head>
 <body>
 <div id="topbar">
-  <b style="font-size:14px">Armbot <span class="ver">v8-29-1603</span></b>
+  <b style="font-size:14px">Armbot <span class="ver">v8-29-1647</span></b>
   <select id="mapSel" style="background:#222;color:#eee;border:1px solid #555;border-radius:3px;padding:3px 6px;font-size:12px"></select>
   <button id="btnNav" onclick="startNav(); this.blur();" style="background:#38c">启动导航</button>
   <button id="btnMap" onclick="startMapping(); this.blur();" style="background:#38c">重新建图</button>
