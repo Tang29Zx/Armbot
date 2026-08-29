@@ -276,7 +276,9 @@ class Handler(BaseHTTPRequestHandler):
             w, h, res = m["w"], m["h"], m["res"]
             ox, oy = m["ox"], m["oy"]
             raw = bytearray()
-            for j in range(h):            # j=0 是地图底部（世界 y 最小）
+            # 8-29: PGM 行序反转——map_server 加载 PGM 会垂直翻转（PGM顶部→地图底部），
+            # 故世界底部(j=0)必须写在 PGM 底部（最后一行），否则导航加载后地图上下颠倒
+            for j in range(h - 1, -1, -1):    # 世界顶部先写（PGM 顶部），世界底部最后
                 row = m["data_full"][j]
                 for i in range(w):
                     v = row[i]
@@ -291,14 +293,23 @@ class Handler(BaseHTTPRequestHandler):
                     f.write(b"P5\n%d %d\n255\n" % (w, h))
                     f.write(bytes(raw))
                 with open(name + ".yaml", "w") as f:
-                    f.write("image: map_save.pgm\nresolution: %.6f\norigin: [%.4f, %.4f, 0.0]\nnegate: 0\noccupied_thresh: 0.65\nfree_thresh: 0.25\n" % (res, ox, oy))
+                    # 8-29: 阈值改 0.9/0.1——PGM 未知写 205(occ=0.196)，默认阈值 0.65/0.25 会把 205 判成空闲
+                    # 0.1 < 0.196 < 0.9 → 未知区域在导航加载后保留为 -1（map_server 标准）
+                    f.write("image: map_save.pgm\nresolution: %.6f\norigin: [%.4f, %.4f, 0.0]\nnegate: 0\noccupied_thresh: 0.9\nfree_thresh: 0.1\n" % (res, ox, oy))
                 self._send('{"ok":true,"msg":"已保存 %s (%dx%d)"}' % (name, w, h), "application/json")
             except Exception as e:
                 self._send('{"ok":false,"msg":"保存失败: %s"}' % e, "application/json")
         elif self.path.startswith("/api/emergency_stop"):
-            # 8-29: 急停——直接 I2C 清零（不依赖底盘节点，底盘崩了也能停）+ 零速度 + 取消导航
+            # 8-29 15:05 升级急停：只清 I2C 不够——底盘节点活着会按 Nav2 cmd_vel 50ms 内写回速度，
+            # 急停必须从源头切断：杀底盘节点 + 杀 nav2/定位进程（Web 自身保留），再 I2C 清零
+            estop_cmd = (
+                "ps aux | grep -E 'chassis_control_node|nav2_|localization_slam|map_server|"
+                "map_relay|ydlidar_node|scan_filter|static_transform' "
+                "| grep -v grep | grep -v armbot_web | awk '{print $2}' | xargs -r kill -9 2>/dev/null; "
+                "sleep 1; python3 /home/sunrise/stop.py"
+            )
             try:
-                subprocess.Popen(["python3", "/home/sunrise/stop.py"],
+                subprocess.Popen(["bash", "-c", estop_cmd],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             except Exception:
                 pass
@@ -309,7 +320,7 @@ class Handler(BaseHTTPRequestHandler):
                     NODE.cancel_goal()
             except Exception:
                 pass
-            self._send('{"ok":true,"msg":"急停!"}', "application/json")
+            self._send('{"ok":true,"msg":"急停!（已切断底盘与导航）"}', "application/json")
         elif self.path.startswith("/api/cmd"):
             from urllib.parse import urlparse, parse_qs
             q = parse_qs(urlparse(self.path).query)
@@ -368,7 +379,7 @@ td{padding:2px 8px;color:#aaa}
 </head>
 <body>
 <div id="topbar">
-  <b style="font-size:14px">Armbot <span class="ver">v8-29-1315</span></b>
+  <b style="font-size:14px">Armbot <span class="ver">v8-29-1505</span></b>
   <select id="mapSel" style="background:#222;color:#eee;border:1px solid #555;border-radius:3px;padding:3px 6px;font-size:12px"></select>
   <button id="btnNav" onclick="startNav(); this.blur();" style="background:#38c">启动导航</button>
   <button id="btnMap" onclick="startMapping(); this.blur();" style="background:#38c">重新建图</button>
@@ -406,9 +417,12 @@ var keys = {};
 // 8-29: 急停——直接 I2C 清零（底盘崩了也能停），独立于普通停止
 function emergencyStop(){
   var st = document.getElementById("status");
-  st.textContent = "急停!";
+  var b = document.getElementById("btnEStop");
+  st.textContent = "急停中...（切断底盘与导航）";
+  if(b){ b.textContent = "急停中..."; }
   fetch("/api/emergency_stop").then(function(r){return r.json();}).then(function(d){
-    st.textContent = d.ok ? "已急停 ✓" : ("急停失败: " + d.msg);
+    st.textContent = d.ok ? "已急停 ✓ 车已停" : ("急停失败: " + d.msg);
+    if(b){ setTimeout(function(){ b.textContent = "急停"; }, 3000); }
     setTimeout(function(){ st.textContent = ""; }, 4000);
   }).catch(function(){ st.textContent = "急停失败: 网络错误"; });
 }
@@ -562,9 +576,9 @@ function draw(){
       var v = d[j][i];
       var p = img.data;
       var p4 = ((H-1-j)*W + i) * 4;
-      if(v === -1){ p[p4]=255; p[p4+1]=255; p[p4+2]=255; }
-      else if(v >= 100){ p[p4]=0; p[p4+1]=0; p[p4+2]=0; }
-      else { p[p4]=180; p[p4+1]=180; p[p4+2]=180; }
+      if(v === -1){ p[p4]=130; p[p4+1]=130; p[p4+2]=130; }     // 未知 → 深灰
+      else if(v >= 100){ p[p4]=0; p[p4+1]=0; p[p4+2]=0; }       // 障碍 → 黑
+      else { p[p4]=255; p[p4+1]=255; p[p4+2]=255; }             // 空闲 → 白（8-29: 与未知区分）
       p[p4+3]=255;
     }
   }
