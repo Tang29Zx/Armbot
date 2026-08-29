@@ -42,12 +42,29 @@ class MotorDriver:
     # ─── 底层 I2C 读写 ─────────────────────────────────────
 
     def _write_reg(self, reg, data_bytes):
-        """写寄存器：[reg, data0, data1, ...] (对应 HAL_I2C_Master_Transmit)"""
-        self.bus.write_i2c_block_data(self.addr, reg, data_bytes)
+        """写寄存器：[reg, data0, data1, ...] (对应 HAL_I2C_Master_Transmit)
+        8-29: 加重试——偶发 Errno 121（电机干扰/线束接触）重试 3 次，避免节点崩溃"""
+        last_err = None
+        for attempt in range(3):
+            try:
+                self.bus.write_i2c_block_data(self.addr, reg, data_bytes)
+                return
+            except OSError as e:
+                last_err = e
+                time.sleep(0.02)
+        raise last_err
 
     def _read_reg(self, reg, length):
-        """读寄存器 (对应 receive_from_device)"""
-        return self.bus.read_i2c_block_data(self.addr, reg, length)
+        """读寄存器 (对应 receive_from_device)
+        8-29: 加重试——偶发 Errno 121 重试 3 次，避免节点崩溃"""
+        last_err = None
+        for attempt in range(3):
+            try:
+                return self.bus.read_i2c_block_data(self.addr, reg, length)
+            except OSError as e:
+                last_err = e
+                time.sleep(0.02)
+        raise last_err
 
     @staticmethod
     def _int8_to_uint8(val):
