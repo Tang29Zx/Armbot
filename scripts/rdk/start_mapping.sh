@@ -14,7 +14,7 @@ source ~/armbot-slam/ros2_ws/install/setup.bash
 LOG=/tmp/mapping
 mkdir -p $LOG
 
-echo "=== [1/5] 底盘 ==="
+echo "=== [1/6] 底盘 ==="
 nohup ros2 launch chassis_control chassis_control.launch.py > $LOG/chassis.log 2>&1 < /dev/null &
 sleep 5
 
@@ -29,7 +29,7 @@ done
 [ -z "$LIDAR_PORT" ] && LIDAR_PORT=$(ls /dev/ttyUSB* 2>/dev/null | head -1)
 [ -z "$LIDAR_PORT" ] && { echo "!!! 未找到雷达串口 /dev/ttyUSB*，中止"; exit 1; }
 
-echo "=== [2/5] 官方雷达 ($LIDAR_PORT, singleChannel) ==="
+echo "=== [2/6] 官方雷达 ($LIDAR_PORT, singleChannel) ==="
 nohup ros2 run ydlidar ydlidar_node \
   --ros-args \
   -p port:=$LIDAR_PORT \
@@ -37,25 +37,33 @@ nohup ros2 run ydlidar ydlidar_node \
   -p baudrate:=115200 \
   -p singleChannel:=true \
   -p angle_min:=-180.0 -p angle_max:=180.0 \
-  -p frequency:=5.0 \
+  -p frequency:=8.0 \
   > $LOG/lidar.log 2>&1 < /dev/null &
 sleep 6
 
-echo "=== [3/5] 静态 tf (map->odom, base_link->laser) ==="
-nohup ros2 run tf2_ros static_transform_publisher 0 0 0 0 0 0 map odom > $LOG/tf1.log 2>&1 < /dev/null &
+echo "=== [3/6] scan_filter (滤 0m 假点 -> /scan_mapping) ==="
+# 14:25 恢复：雷达 22% 0m 假点（集中后部/前方）直接进 slam 会污染匹配→定位累积漂移→图糊
+# 只滤 ≤0.05m 假点，其余真实点全保留（8-17 时雷达无此假点故当时不需要）
+setsid nohup python3 ~/scan_filter.py > $LOG/scan_filter.log 2>&1 < /dev/null &
+sleep 2
+
+echo "=== [4/6] 静态 tf (base_link->laser x=0.175) ==="
+# 8-29 对齐 8-18 成功脚本(manual_mapping.sh)：不加 static map->odom——
+# 会与 slam 动态 map->odom 冲突导致 tf 抖动/建图错乱（slam publish_tf: true 已动态发布）
 # 8-29: 曾误判雷达装反加 yaw=π，实测车头指示反向，撤销恢复 yaw=0
 nohup ros2 run tf2_ros static_transform_publisher 0.175 0 0.18 0 0 0 base_link laser > $LOG/tf2.log 2>&1 < /dev/null &
 sleep 2
 
-echo "=== [4/5] slam_toolbox ==="
+echo "=== [5/6] slam_toolbox (订阅 /scan_mapping，滤 0m 假点) ==="
 nohup ros2 run slam_toolbox async_slam_toolbox_node \
   --ros-args \
+  --remap /scan:=/scan_mapping \
   --params-file ~/armbot-slam/ros2_ws/install/armbot_bringup/share/armbot_bringup/config/slam_toolbox_params.yaml \
   > $LOG/slam.log 2>&1 < /dev/null &
 sleep 8
 
-echo "=== [5/5] Web 控制页 ==="
-nohup python3 ~/armbot_web.py > $LOG/web.log 2>&1 < /dev/null &
+echo "=== [6/6] Web 控制页 ==="
+setsid nohup python3 ~/armbot_web.py > $LOG/web.log 2>&1 < /dev/null &
 sleep 4
 
 echo ""

@@ -33,7 +33,7 @@ nohup ros2 run ydlidar ydlidar_node \
   -p baudrate:=115200 \
   -p singleChannel:=true \
   -p angle_min:=-180.0 -p angle_max:=180.0 \
-  -p frequency:=5.0 \
+  -p frequency:=8.0 \
   > $LOG/lidar.log 2>&1 < /dev/null &
 sleep 6
 

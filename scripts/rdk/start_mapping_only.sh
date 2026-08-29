@@ -25,8 +25,10 @@ LOG=/tmp/explore_run
 mkdir -p $LOG
 
 echo "=== kill 建图相关残留（保留 armbot_web）==="
-ps aux | grep -E "chassis_control|ydlidar|async_slam|static_transform|scan_filter" \
-  | grep -v grep | grep -vE "armbot_web|bash|start_mapping" \
+# 8-29: 补全 nav 进程模式（nav2/map_server/localization_slam/map_relay）——否则导航进程杀不掉，
+# 建图与导航两套链路并存 → 双雷达双 slam 抢 /map 冲突
+ps aux | grep -E "chassis_control|ydlidar|async_slam|localization_slam|nav2_|map_server|map_relay|robot_state_pub|static_transform|scan_filter" \
+  | grep -v grep | grep -vE "armbot_web|bash|start_mapping|start_nav" \
   | awk '{print $2}' | xargs -r kill -9 2>/dev/null
 sleep 3
 
@@ -43,7 +45,7 @@ done
 echo "=== [1/5] 雷达 $LIDAR_PORT ==="
 nohup ros2 run ydlidar ydlidar_node \
   --ros-args -p port:=$LIDAR_PORT -p frame_id:=laser -p baudrate:=115200 \
-  -p singleChannel:=true -p angle_min:=-180.0 -p angle_max:=180.0 -p frequency:=5.0 \
+  -p singleChannel:=true -p angle_min:=-180.0 -p angle_max:=180.0 -p frequency:=8.0 \
   > $LOG/lidar.log 2>&1 < /dev/null &
 sleep 6
 

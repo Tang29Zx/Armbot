@@ -23,6 +23,8 @@ MAP, ODOM, CMD = None, {"x": 0, "y": 0, "theta": 0}, {"x": 0.0, "y": 0.0, "z": 0
 NODE = None
 MAPPING_LOCK = threading.Lock()
 MAPPING_LAST = [0.0]  # 上次触发开始建图的时间（防重复）
+NAV_LOCK = threading.Lock()
+NAV_LAST = [0.0]      # 上次触发启动导航的时间（防重复）
 # map->odom 变换（tx, ty, theta）——把 odom 坐标变换到 map 系
 TFOFF = [0.0, 0.0, 0.0]
 # 纯里程计模式：用户设定初始位姿 + odom 参考点（无雷达/无 slam 时用）
@@ -210,6 +212,36 @@ class Handler(BaseHTTPRequestHandler):
         elif self.path.startswith("/api/cancel_goal"):
             ok = bool(NODE and NODE.cancel_goal())
             self._send('{"ok":%s}' % ("true" if ok else "false"), "application/json")
+        elif self.path.startswith("/api/nav_maps"):
+            # 列出 ~/ 下可用的地图（*.yaml → 名字列表，去掉扩展名）
+            import glob as _glob
+            maps = []
+            for f in sorted(_glob.glob("/home/sunrise/*.yaml")):
+                name = f.rsplit("/", 1)[-1][:-5]
+                if name:
+                    maps.append(name)
+            self._send(json.dumps({"ok": True, "maps": maps}), "application/json")
+        elif self.path.startswith("/api/start_nav"):
+            # 一键启动导航：选地图 → 启动底盘+nav.launch+map_server+slam（Web 保持运行）
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            map_name = (q.get("map", ["map_verify"])[0]).strip()
+            map_name = map_name[:-5] if map_name.endswith(".yaml") else map_name
+            now = time.time()
+            with NAV_LOCK:
+                if now - NAV_LAST[0] < 90:
+                    self._send('{"ok":true,"msg":"导航正在启动中（90秒防重）..."}', "application/json")
+                    return
+                NAV_LAST[0] = now
+                try:
+                    os.makedirs("/tmp/nav_run", exist_ok=True)
+                    logf = open("/tmp/nav_run/start_nav_web.log", "a")
+                    subprocess.Popen(["bash", "/home/sunrise/start_nav_web.sh", map_name],
+                                     stdout=logf, stderr=subprocess.STDOUT,
+                                     stdin=subprocess.DEVNULL)
+                    self._send('{"ok":true,"msg":"导航启动中（地图: %s，约需 90 秒）..."}' % map_name, "application/json")
+                except Exception as e:
+                    self._send('{"ok":false,"msg":"%s"}' % e, "application/json")
         elif self.path.startswith("/api/start_mapping"):
             # 一键启动建图进程（雷达+底盘+tf+slam），Web 自身保持运行
             # 30 秒内重复点击忽略——防止并发执行多套进程互相踩踏
@@ -336,7 +368,9 @@ td{padding:2px 8px;color:#aaa}
 </head>
 <body>
 <div id="topbar">
-  <b style="font-size:14px">Armbot <span class="ver">v8-29</span></b>
+  <b style="font-size:14px">Armbot <span class="ver">v8-29-1315</span></b>
+  <select id="mapSel" style="background:#222;color:#eee;border:1px solid #555;border-radius:3px;padding:3px 6px;font-size:12px"></select>
+  <button id="btnNav" onclick="startNav(); this.blur();" style="background:#38c">启动导航</button>
   <button id="btnMap" onclick="startMapping(); this.blur();" style="background:#38c">重新建图</button>
   <button id="btnSave" onclick="saveMap(); this.blur();" style="background:#3a3">保存地图</button>
   <button id="btnEStop" onclick="emergencyStop(); this.blur();" style="background:#d22;font-weight:bold;padding:6px 20px">急停</button>
@@ -379,17 +413,59 @@ function emergencyStop(){
   }).catch(function(){ st.textContent = "急停失败: 网络错误"; });
 }
 
+// 加载地图列表到下拉框（页面打开时调用）
+function loadMaps(){
+  fetch("/api/nav_maps").then(function(r){ return r.json(); }).then(function(d){
+    var sel = document.getElementById("mapSel");
+    if(!sel || !d.ok || !d.maps || !d.maps.length) return;
+    sel.innerHTML = "";
+    d.maps.forEach(function(m){
+      var o = document.createElement("option");
+      o.value = m; o.textContent = m;
+      sel.appendChild(o);
+    });
+  }).catch(function(){});
+}
+
+// 启动导航：选地图 → 后端启动底盘+nav.launch（Web 保持运行）；90秒防重复
+function startNav(){
+  var b = document.getElementById("btnNav");
+  var st = document.getElementById("status");
+  var sel = document.getElementById("mapSel");
+  if(b.disabled) return;
+  var m = sel && sel.value ? sel.value : "map_verify";
+  b.disabled = true; b.textContent = "启动中...";
+  // 8-29: 与重新建图互斥（两套链路不能同时跑）
+  var bm = document.getElementById("btnMap");
+  if(bm) bm.disabled = true;
+  st.textContent = "导航启动中（地图: " + m + "）...";
+  fetch("/api/start_nav?map=" + encodeURIComponent(m)).then(function(r){ return r.json(); }).then(function(d){
+    st.textContent = d.ok ? d.msg : ("启动失败: " + d.msg);
+  }).catch(function(){ st.textContent = "启动失败: 网络错误"; }).then(function(){
+    setTimeout(function(){
+      b.disabled = false; b.textContent = "启动导航";
+      if(bm) bm.disabled = false;
+    }, 90000);
+  });
+}
+
 // 开始建图：调后端一键启动雷达/底盘/slam（不重启 Web）；30秒防重复
 function startMapping(){
   var b = document.getElementById("btnMap");
   var st = document.getElementById("status");
   if(b.disabled) return;
   b.disabled = true; b.textContent = "启动中...";
+  // 8-29: 与启动导航互斥（两套链路不能同时跑）
+  var bn = document.getElementById("btnNav");
+  if(bn) bn.disabled = true;
   st.textContent = "建图启动中...";
   fetch("/api/start_mapping").then(function(r){return r.json();}).then(function(d){
     st.textContent = d.ok ? d.msg : ("启动失败: " + d.msg);
   }).catch(function(){ st.textContent = "启动失败: 网络错误"; }).then(function(){
-    setTimeout(function(){ b.disabled = false; b.textContent = "重新建图"; }, 10000);
+    setTimeout(function(){
+      b.disabled = false; b.textContent = "重新建图";
+      if(bn) bn.disabled = false;
+    }, 10000);
   });
 }
 
@@ -458,6 +534,7 @@ function update(){
 setInterval(update, 100);
 
 function load(){
+  loadMaps();  // 8-29: 加载地图下拉列表
   try{
     fetch("/api/map").then(function(r){ return r.json(); }).then(function(m){
       if(m && m.data){ map = m; } else { map = null; }  // 8-29: 地图被清空时也清空前端缓存（否则旧图残留）
