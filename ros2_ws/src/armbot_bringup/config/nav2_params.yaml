@@ -80,8 +80,8 @@ controller_server:
     # --- Progress checker ---
     progress_checker:
       plugin: "nav2_controller::SimpleProgressChecker"
-      required_movement_radius: 0.2
-      movement_time_allowance: 12.0
+      required_movement_radius: 0.15    # 8-30 修复: 0.2→0.15（原地转头也算进展，避免转一半被判失败）
+      movement_time_allowance: 20.0    # 8-30 修复: 12→20（留足 180° 转头时间）
 
     # --- Goal checker ---
     general_goal_checker:
@@ -112,7 +112,7 @@ controller_server:
       decel_lim_y: -0.3
       decel_lim_theta: -1.5
       vx_samples: 8
-      vy_samples: 8                 # mecanum 横移采样
+      vy_samples: 4                 # 8-30 修复: 8→4（横移采样减半防 controller 掉帧，掉帧导致控制断续）
       vtheta_samples: 8   # 8-29 18:00: 6→8（旋转采样更细）
       sim_time: 1.5    # 8-29 18:00: 1.0→1.5（轨迹仿真更充分，旋转轨迹 1.5s 转 39-52° 得分优势明显）
       linear_granularity: 0.05
@@ -126,24 +126,23 @@ controller_server:
       stateful: true
       critics:
         - "dwb_critics::RotateToGoal"
-        - "dwb_critics::Oscillation"
-        - "dwb_critics::BaseObstacle"     # reactive obstacle avoidance
+        - "dwb_critics::BaseObstacle"     # reactive obstacle avoidance（8-30 修复: 移除 Oscillation——脉冲式旋转元凶）
         - "dwb_critics::GoalAlign"
         - "dwb_critics::GoalDist"
         - "dwb_critics::PathAlign"
         - "dwb_critics::PathDist"
         - "dwb_critics::PreferForward"
-      BaseObstacle.scale: 15.0
-      BaseObstacle.obstacle_cost_threshold: 150
-      RotateToGoal.scale: 32.0
-      RotateToGoal.slowing_factor: 5.0
-      RotateToGoal.lookahead_time: -1.0
-      GoalAlign.scale: 12.0
-      GoalAlign.forward_point_distance: 0.325
-      GoalDist.scale: 12.0
-      PathAlign.scale: 30.0     # 增强车头对齐路径：目标在后方时先原地转头再走
-      PathDist.scale: 12.0    # 8-29 18:00: 16→12（旋转轨迹 PathDist 劣势减小，促进转弯）
-      PreferForward.scale: 0.0    # 8-29 18:00: 0.1→0（消除前进偏好，避免"目标在后方仍选前进"）
+      dwb_critics::BaseObstacle.scale: 15.0
+      dwb_critics::BaseObstacle.obstacle_cost_threshold: 150
+      dwb_critics::RotateToGoal.scale: 32.0
+      dwb_critics::RotateToGoal.slowing_factor: 5.0
+      dwb_critics::RotateToGoal.lookahead_time: -1.0
+      dwb_critics::GoalAlign.scale: 12.0
+      dwb_critics::GoalAlign.forward_point_distance: 0.325
+      dwb_critics::GoalDist.scale: 12.0
+      dwb_critics::PathAlign.scale: 30.0     # 8-30 修复: 加 dwb_critics:: 前缀（裸名从未生效→不会转弯根因！）
+      dwb_critics::PathDist.scale: 12.0    # 8-29 18:00: 16→12（旋转轨迹 PathDist 劣势减小，促进转弯）
+      dwb_critics::PreferForward.scale: 0.0    # 8-29 18:00: 0.1→0（消除前进偏好，避免"目标在后方仍选前进"）
 
 # =============================================================================
 # Planner Server
@@ -328,13 +327,14 @@ global_costmap:
           raytrace_max_range: 5.0
           raytrace_min_range: 0.1
           obstacle_max_range: 4.0
-          obstacle_min_range: 1.0    # 8-22: 不标记 <1.0m（假障碍环双保险）
+          obstacle_min_range: 0.3    # 8-30 碰撞修复: 1.0→0.3（scan_filter 已滤 0m 假点+车体，0.3m 外是真实障碍；
+                                     # 1.0 会滤掉近处障碍→避障盲区→撞墙）
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
-        inflation_radius: 0.15
-        cost_scaling_factor: 5.0
+        inflation_radius: 0.25    # 8-30 碰撞修复: 0.15→0.25（>车半宽0.175，避障缓冲；0.15 太贴障碍）
+        cost_scaling_factor: 4.0    # 8-30 碰撞修复: 5.0→4.0（今天避障最终值，轮子保留余量）
 
 # =============================================================================
 # Local Costmap
@@ -373,12 +373,12 @@ local_costmap:
           raytrace_max_range: 3.0
           raytrace_min_range: 0.1
           obstacle_max_range: 2.5
-          obstacle_min_range: 1.0    # 8-22: 不标记 <1.0m（假障碍环双保险）
+          obstacle_min_range: 0.3    # 8-30 碰撞修复: 1.0→0.3（同 global：近处障碍必须感知）
 
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
-        inflation_radius: 0.15
-        cost_scaling_factor: 5.0
+        inflation_radius: 0.25    # 8-30 碰撞修复: 0.15→0.25
+        cost_scaling_factor: 4.0    # 8-30 碰撞修复: 5.0→4.0
 
 
