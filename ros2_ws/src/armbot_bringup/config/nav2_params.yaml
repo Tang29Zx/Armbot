@@ -97,7 +97,8 @@ controller_server:
     FollowPath:
       plugin: "dwb_core::DWBLocalPlanner"
       debug_trajectory_details: true
-      min_vel_x: 0.0
+      min_vel_x: -0.12    # 8-30 19:47: 0→-0.12（允许倒车！目标在后方+旋转被障碍挡时，倒车是最优解；
+                          # 之前 0 禁止后退 → DWB 只有小旋转可选 → 原地左右摇摆）
       min_vel_y: -0.15
       max_vel_x: 0.15
       max_vel_y: 0.15
@@ -133,16 +134,18 @@ controller_server:
         - "dwb_critics::PathDist"
         - "dwb_critics::PreferForward"
       dwb_critics::BaseObstacle.scale: 15.0
-      dwb_critics::BaseObstacle.obstacle_cost_threshold: 150
-      dwb_critics::RotateToGoal.scale: 32.0
+      dwb_critics::BaseObstacle.obstacle_cost_threshold: 180    # 8-30 19:54: 150→180（更早判定"贴障碍前进"轨迹无效，
+                                                                 # 防 PreferForward 强推前进时撞障碍；150 允许中等 cost 轨迹被选）
+      dwb_critics::RotateToGoal.scale: 20.0    # 8-30 19:41: 32→20（降低纯旋转偏好，避免障碍附近死磕旋转→摇摆）
       dwb_critics::RotateToGoal.slowing_factor: 5.0
       dwb_critics::RotateToGoal.lookahead_time: -1.0
       dwb_critics::GoalAlign.scale: 12.0
       dwb_critics::GoalAlign.forward_point_distance: 0.325
       dwb_critics::GoalDist.scale: 12.0
-      dwb_critics::PathAlign.scale: 30.0     # 8-30 修复: 加 dwb_critics:: 前缀（裸名从未生效→不会转弯根因！）
+      dwb_critics::PathAlign.scale: 15.0    # 8-30 19:41: 30→15（降低对齐惩罚，允许"边前进边转"螺旋接近，不原地死磕）
       dwb_critics::PathDist.scale: 12.0    # 8-29 18:00: 16→12（旋转轨迹 PathDist 劣势减小，促进转弯）
-      dwb_critics::PreferForward.scale: 0.0    # 8-29 18:00: 0.1→0（消除前进偏好，避免"目标在后方仍选前进"）
+      dwb_critics::PreferForward.scale: 0.2    # 8-30 19:54: 1.0→0.2（1.0 强推前进→路口找不到旋转空间时直接撞障碍；
+                                              # 0.2 轻微偏好前进，保留旋转/倒车逃生，避免摇摆与撞障碍两端极端）
 
 # =============================================================================
 # Planner Server
