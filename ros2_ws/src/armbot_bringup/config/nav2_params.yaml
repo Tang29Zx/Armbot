@@ -302,8 +302,8 @@ global_costmap:
       # Robot footprint — rectangular approximation
       # Adjust these values to match your actual chassis dimensions.
       # Format: [[x1,y1], [x2,y2], ...] in meters, relative to base_link
-      robot_radius: 0.17   # fallback if footprint fails; covers ~0.30x0.26 chassis
-      footprint: "[[0.17, 0.15], [0.17, -0.15], [-0.17, -0.15], [-0.17, 0.15]]"
+      robot_radius: 0.20   # 8-30 19:08 修复: 0.17→0.20（实际车 0.40×0.35，昨天 0.17×0.15 配小→后轮刮障碍）
+      footprint: "[[0.20, 0.175], [0.20, -0.175], [-0.20, -0.175], [-0.20, 0.175]]"
 
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
 
@@ -333,7 +333,8 @@ global_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
-        inflation_radius: 0.25    # 8-30 碰撞修复: 0.15→0.25（>车半宽0.175，避障缓冲；0.15 太贴障碍）
+        inflation_radius: 0.30    # 8-30 19:18 修复: 0.25→0.30（旋转扫掠半径=√(0.20²+0.175²)=0.266m！
+                                  # 0.25 < 0.266 → 旋转时后轮超出保护 → 刮障碍 + DWB 旋转被判碰撞 → 后方目标左右摆动）
         cost_scaling_factor: 4.0    # 8-30 碰撞修复: 5.0→4.0（今天避障最终值，轮子保留余量）
 
 # =============================================================================
@@ -355,8 +356,8 @@ local_costmap:
       track_unknown_space: false
       transform_tolerance: 0.3
 
-      robot_radius: 0.17
-      footprint: "[[0.17, 0.15], [0.17, -0.15], [-0.17, -0.15], [-0.17, 0.15]]"
+      robot_radius: 0.20
+      footprint: "[[0.20, 0.175], [0.20, -0.175], [-0.20, -0.175], [-0.20, 0.175]]"
 
       plugins: ["obstacle_layer", "inflation_layer"]
 
@@ -378,7 +379,7 @@ local_costmap:
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         enabled: true
-        inflation_radius: 0.25    # 8-30 碰撞修复: 0.15→0.25
+        inflation_radius: 0.30    # 8-30 19:18 修复: 0.25→0.30（同 global：覆盖旋转扫掠 0.266m）
         cost_scaling_factor: 4.0    # 8-30 碰撞修复: 5.0→4.0
 
 
